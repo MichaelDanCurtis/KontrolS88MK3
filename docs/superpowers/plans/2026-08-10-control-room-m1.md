@@ -592,11 +592,13 @@ git commit -m "feat(core): graph model with validation-only CompiledGraph constr
 - Create: `crates/cr-engine/Cargo.toml`, `crates/cr-engine/src/lib.rs`, `crates/cr-engine/src/nodes.rs`
 
 **Interfaces:**
-- Consumes: `CompiledGraph`, `CompiledNode`, `NodeSpec`, `LfoShape` from Task 2
+- Consumes: `LfoShape` from Task 2
 - Produces:
   - `const TICK_HZ: f64 = 1000.0`
   - `fn lfo_value(shape: LfoShape, freq_hz: f64, tick: u64) -> f32`
-  - `struct Engine` with `Engine::new(CompiledGraph) -> Engine`, `fn tick(&mut self, tick: u64)`, `fn value(&self, idx: usize) -> f32`
+
+**Scope note:** `struct Engine` is **Task 4's** deliverable, not this one. Task 3
+creates the crate and the pure LFO function only.
 
 **Why the tick is a parameter:** phase is computed from the absolute tick index, so there is no accumulated drift and no clock read. The same tick number always yields the same value, which is what makes the golden tests below exact.
 
