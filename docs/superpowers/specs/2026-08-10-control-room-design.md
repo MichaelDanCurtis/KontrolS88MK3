@@ -23,6 +23,7 @@ The Native Instruments Komplete Kontrol client is heavyweight and mandatory for 
 - **VCV Rack bridge** — software modular and hardware in one graph
 - **Ableton two-way integration** — see and change device parameters from the keyboard
 - **CV / audio-rate signals** via DC-coupled interfaces
+- **MK3 framebuffer graphics** — pixel-level drawing on the keyboard display (§9.1)
 
 These are explicitly out of v1 scope. The architecture exists to make each one an *addition* rather than a rewrite. See §9.
 
@@ -44,7 +45,7 @@ These are explicitly out of v1 scope. The architecture exists to make each one a
 
 ### Not in v1
 
-NKS parsing, AI patching, VCV Rack bridge, Ableton integration, plugin hosting, real CV I/O.
+NKS parsing, AI patching, VCV Rack bridge, Ableton integration, plugin hosting, real CV I/O, and pixel-level MK3 display graphics (see §9.1 — the designated post-v1 focus).
 
 ### Success criteria
 
@@ -176,9 +177,17 @@ Everything else degrades rather than fails:
 - LED updates are `0x82` packets with 128 note-indexed entries
 - Entering legacy LED mode (`A0 00 00`) **disables MIDI** until `A0 01 00` is sent
 - Driving LEDs via NI's background hardware service (msgpack-RPC over a Unix socket) preserves MIDI; claiming the bulk interface directly does not
-- Arbitrary pixel drawing on the MK3 display is **not publicly reverse-engineered**; v1 uses MIDI Templates and DAW-port SysEx for structured UI only
+- The MK3 **display is entirely unsolved**: resolution, pixel format, USB endpoint, and framebuffer layout are all unknown publicly. Screen-update traffic has been captured (4-byte little-endian payload-size header, `84 00` prefix) but never decoded or reproduced. No working MK3 screen-rendering code exists anywhere.
 
 Anything in `cr-s88` derived from these sources is marked `verify against hardware` in code and docs. **Hardware verification is an explicit manual gate.** A green test suite must never be reported as confirming device behavior.
+
+### 7.2 Display capability ceiling
+
+v1 drives the S88 display through MIDI Templates and DAW-port SysEx, which affords a **structured parameter UI** — not two lines of text. The reference implementation (DrivenByMoss) already renders track name and number, device name, parameter bank name, and per-parameter names with live values, and extends firmware 2.0's native plugin edit mode with its own pages.
+
+This suits Control Room well: a module reading `LFO→VCA 47` with a grabbable knob is parameter-shaped data, and forcing it through a framebuffer would be fighting the hardware.
+
+**What the ceiling actually costs us** is anything picture-shaped: waveform views, a visibly cycling LFO shape, a mini node graph on the keyboard. Those require the framebuffer (§9.1).
 
 ---
 
@@ -209,5 +218,22 @@ Each deferred feature attaches at exactly one seam:
 | VCV Rack | New adapter + source/sink types |
 | Ableton two-way | New adapter (Remote Script) + surface bindings |
 | Real CV | New adapter; continuous signals already modeled |
+| MK3 framebuffer (§9.1) | New render path inside `cr-s88`; surface bindings unchanged |
 
 No deferred feature requires changing the graph model, the command API, or the engine.
+
+### 9.1 MK3 framebuffer research spike — designated post-v1 focus
+
+Unlocking pixel-level drawing on the S88 display is the **primary planned effort after v1**. It is deliberately excluded from the v1 critical path because it is open-ended research with no guaranteed endpoint, and it requires hardware, a USB capture rig, and patience.
+
+It is tractable rather than speculative, because it is a **capture-and-diff against a known-good sibling protocol** rather than from-scratch analysis:
+
+- NI's screen protocol is solved on sibling hardware — `MMK3-HID-Control` pushes arbitrary images to Maschine MK3 screens, and its author expects the approach to carry to MK2 keyboards with minor changes
+- The MK2 *keyboard* framebuffer works today; KompleteSynthesia mirrors an entire application window onto MK2 displays
+- Captured MK2 and MK3 screen packets look structurally similar (`84 00 00 60 …` versus `84 00 …`), suggesting shared framing across generations
+
+**Approach:** establish MK2-style rendering as a working reference, capture MK3 screen traffic from the NI client, diff framing against the known MK2 structure, then bisect toward resolution and pixel format.
+
+**Success would unlock:** waveform views, animated LFO shapes, and a mini node graph on the keyboard itself.
+
+**Architectural containment:** this lands entirely as a new render path inside `cr-s88`. The graph model, command API, engine, and surface bindings are untouched — so the spike can fail without costing anything built for v1.
