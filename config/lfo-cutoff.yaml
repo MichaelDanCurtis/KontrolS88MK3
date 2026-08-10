@@ -1,0 +1,22 @@
+# The M1 demo patch: a slow triangle LFO sweeping the Peak's filter cutoff.
+# Cutoff is the verification target because the result is unmistakably audible.
+device:
+  id: peak
+  port: Peak          # case-insensitive substring match on the output port name
+  channel: 1          # 1-16 as printed on the instrument
+nodes:
+  - id: lfo1
+    spec: !Lfo
+      shape: triangle
+      freq_hz: 0.3
+    input: null
+  - id: scale1
+    spec: !Scale
+      min: 20.0
+      max: 90.0
+    input: lfo1
+  - id: cutoff
+    spec: !Sink
+      device: peak
+      param: filter.cutoff
+    input: scale1
