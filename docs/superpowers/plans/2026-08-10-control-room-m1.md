@@ -1004,7 +1004,7 @@ git commit -m "feat(engine): allocation-free graph evaluation with golden chain 
   - `struct Parameter { pub encoding: Encoding, pub min: f32, pub max: f32 }`
   - `struct DevicePack { pub name: String, pub display_name: String, pub parameters: HashMap<String, Parameter> }`
   - `impl DevicePack { fn from_yaml(&str) -> Result<Self, PackError>; fn parameter(&self, &str) -> Option<&Parameter> }`
-  - `enum PackError { Yaml, InvalidRange, InvalidCc }`
+  - `enum PackError { Yaml, InvalidRange, InvalidCc, Cc14LsbOverflow, NoParameters }`
 
 **Source of the CC numbers:** the published Novation Summit/Peak MIDI map. Filter cutoff CC 29, resonance CC 79, amp envelope attack/decay/sustain/release CC 86/87/88/89, LFO 1 rate CC 30. **These are treated as unverified until Task 10 confirms them on the instrument.**
 
@@ -1086,6 +1086,14 @@ pub enum PackError {
     InvalidRange { name: String, min: f32, max: f32 },
     #[error("parameter {name} has out-of-range cc number {cc} (must be 0-127)")]
     InvalidCc { name: String, cc: u8 },
+    // A 14-bit pair puts the LSB at msb_cc + 32. Reusing InvalidCc here would
+    // print "must be 0-127" for a value that IS inside 0-127, naming a bound
+    // the input does not violate and hiding the real +32 offset rule.
+    #[error(
+        "parameter {name} uses 14-bit cc {msb_cc}, whose LSB would land on cc {lsb} \
+         (exceeds 127); msb_cc must be <= 95"
+    )]
+    Cc14LsbOverflow { name: String, msb_cc: u8, lsb: u16 },
     #[error("pack has no parameters")]
     NoParameters,
 }
@@ -1155,9 +1163,10 @@ impl DevicePack {
             if let Encoding::Cc14 { msb_cc } = &p.encoding
                 && *msb_cc > 95
             {
-                return Err(PackError::InvalidCc {
+                return Err(PackError::Cc14LsbOverflow {
                     name: name.clone(),
-                    cc: *msb_cc,
+                    msb_cc: *msb_cc,
+                    lsb: *msb_cc as u16 + 32,
                 });
             }
         }
@@ -1226,9 +1235,11 @@ parameters:
     min: 0.0
     max: 1.0
 "#;
+        // 100 passes the generic `cc > 127` check, so this genuinely exercises
+        // the Cc14-specific bound rather than the shared one.
         assert!(matches!(
             DevicePack::from_yaml(src),
-            Err(PackError::InvalidCc { .. })
+            Err(PackError::Cc14LsbOverflow { msb_cc: 100, lsb: 132, .. })
         ));
     }
 

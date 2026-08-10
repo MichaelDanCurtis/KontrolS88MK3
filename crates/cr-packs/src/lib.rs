@@ -12,6 +12,8 @@ pub enum PackError {
     InvalidRange { name: String, min: f32, max: f32 },
     #[error("parameter {name} has out-of-range cc number {cc} (must be 0-127)")]
     InvalidCc { name: String, cc: u8 },
+    #[error("parameter {name} uses 14-bit cc {msb_cc}, whose LSB would land on cc {lsb} (exceeds 127); msb_cc must be <= 95")]
+    Cc14LsbOverflow { name: String, msb_cc: u8, lsb: u16 },
     #[error("pack has no parameters")]
     NoParameters,
 }
@@ -81,9 +83,11 @@ impl DevicePack {
             if let Encoding::Cc14 { msb_cc } = &p.encoding
                 && *msb_cc > 95
             {
-                return Err(PackError::InvalidCc {
+                let lsb = (*msb_cc as u16) + 32;
+                return Err(PackError::Cc14LsbOverflow {
                     name: name.clone(),
-                    cc: *msb_cc,
+                    msb_cc: *msb_cc,
+                    lsb,
                 });
             }
         }
@@ -108,14 +112,27 @@ mod tests {
     #[test]
     fn peak_pack_exposes_documented_cc_numbers() {
         let pack = DevicePack::from_yaml(NOVATION_PEAK_YAML).unwrap();
+
         let cutoff = pack.parameter("filter.cutoff").expect("cutoff present");
         assert_eq!(cutoff.encoding, Encoding::Cc7 { cc: 29 });
+
+        let resonance = pack.parameter("filter.resonance").expect("resonance present");
+        assert_eq!(resonance.encoding, Encoding::Cc7 { cc: 79 });
 
         let attack = pack.parameter("amp_env.attack").expect("attack present");
         assert_eq!(attack.encoding, Encoding::Cc7 { cc: 86 });
 
+        let decay = pack.parameter("amp_env.decay").expect("decay present");
+        assert_eq!(decay.encoding, Encoding::Cc7 { cc: 87 });
+
+        let sustain = pack.parameter("amp_env.sustain").expect("sustain present");
+        assert_eq!(sustain.encoding, Encoding::Cc7 { cc: 88 });
+
         let release = pack.parameter("amp_env.release").expect("release present");
         assert_eq!(release.encoding, Encoding::Cc7 { cc: 89 });
+
+        let lfo1_rate = pack.parameter("lfo1.rate").expect("lfo1.rate present");
+        assert_eq!(lfo1_rate.encoding, Encoding::Cc7 { cc: 30 });
     }
 
     #[test]
@@ -154,7 +171,7 @@ parameters:
 "#;
         assert!(matches!(
             DevicePack::from_yaml(src),
-            Err(PackError::InvalidCc { .. })
+            Err(PackError::Cc14LsbOverflow { .. })
         ));
     }
 
