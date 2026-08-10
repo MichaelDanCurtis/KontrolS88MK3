@@ -12,7 +12,9 @@ pub enum PackError {
     InvalidRange { name: String, min: f32, max: f32 },
     #[error("parameter {name} has out-of-range cc number {cc} (must be 0-127)")]
     InvalidCc { name: String, cc: u8 },
-    #[error("parameter {name} uses 14-bit cc {msb_cc}, whose LSB would land on cc {lsb} (exceeds 127); msb_cc must be <= 95")]
+    #[error(
+        "parameter {name} uses 14-bit cc {msb_cc}, whose LSB would land on cc {lsb} (exceeds 127); msb_cc must be <= 95"
+    )]
     Cc14LsbOverflow { name: String, msb_cc: u8, lsb: u16 },
     #[error("pack has no parameters")]
     NoParameters,
@@ -116,7 +118,9 @@ mod tests {
         let cutoff = pack.parameter("filter.cutoff").expect("cutoff present");
         assert_eq!(cutoff.encoding, Encoding::Cc7 { cc: 29 });
 
-        let resonance = pack.parameter("filter.resonance").expect("resonance present");
+        let resonance = pack
+            .parameter("filter.resonance")
+            .expect("resonance present");
         assert_eq!(resonance.encoding, Encoding::Cc7 { cc: 79 });
 
         let attack = pack.parameter("amp_env.attack").expect("attack present");
