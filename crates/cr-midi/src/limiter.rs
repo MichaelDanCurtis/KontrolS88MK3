@@ -119,9 +119,16 @@ mod tests {
         let mut l = limiter(10);
         assert!(l.admit(0, 64, 0));
         // Send same value within the rate-limit window to prove dedup is checked first
-        assert!(!l.admit(0, 64, 5), "identical value should be deduped even within window");
+        assert!(
+            !l.admit(0, 64, 5),
+            "identical value should be deduped even within window"
+        );
         assert_eq!(l.stats().deduped, 1, "dedup must be counted");
-        assert_eq!(l.stats().rate_limited, 0, "dedup does not count as rate_limited");
+        assert_eq!(
+            l.stats().rate_limited,
+            0,
+            "dedup does not count as rate_limited"
+        );
     }
 
     #[test]
@@ -144,15 +151,24 @@ mod tests {
     #[test]
     fn suppressed_values_are_never_silently_lost() {
         // Every rejected admit must land in exactly one counter, so
-        // sent + deduped + rate_limited accounts for every call.
+        // sent + deduped + rate_limited + unknown_slot accounts for every call.
         let mut l = limiter(10);
         let mut calls = 0u64;
         for tick in 0..1000u64 {
             l.admit(0, (tick % 128) as u16, tick);
             calls += 1;
         }
+        // Also test unknown slot calls
+        for tick in 1000..1010u64 {
+            l.admit(99, 42, tick);
+            calls += 1;
+        }
         let s = l.stats();
-        assert_eq!(s.sent + s.deduped + s.rate_limited, calls);
+        assert_eq!(
+            s.sent + s.deduped + s.rate_limited + s.unknown_slot,
+            calls,
+            "All suppression reasons must be accounted for"
+        );
     }
 
     #[test]
@@ -169,6 +185,13 @@ mod tests {
     fn unknown_slot_fails_closed() {
         let mut l = limiter(10);
         assert!(!l.admit(99, 1, 0));
-        assert_eq!(l.stats().sent, 0);
+        let s = l.stats();
+        assert_eq!(s.sent, 0);
+        assert_eq!(
+            s.unknown_slot, 1,
+            "unknown slot suppression must be counted"
+        );
+        // Verify the accounting invariant: one call should produce exactly one counter increment
+        assert_eq!(s.sent + s.deduped + s.rate_limited + s.unknown_slot, 1);
     }
 }
