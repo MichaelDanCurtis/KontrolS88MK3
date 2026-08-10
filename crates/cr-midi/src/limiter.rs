@@ -25,11 +25,12 @@ pub struct LimiterStats {
     pub sent: u64,
     pub deduped: u64,
     pub rate_limited: u64,
+    pub unknown_slot: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct SlotState {
-    last_raw: Option<u16>,
+    last_sent_raw: Option<u16>,
     last_sent_tick: Option<u64>,
 }
 
@@ -52,7 +53,7 @@ impl Limiter {
     pub fn reset(&mut self, slots: usize) {
         self.slots = vec![
             SlotState {
-                last_raw: None,
+                last_sent_raw: None,
                 last_sent_tick: None,
             };
             slots
@@ -66,10 +67,12 @@ impl Limiter {
     pub fn admit(&mut self, key: usize, raw: u16, tick: u64) -> bool {
         let Some(slot) = self.slots.get_mut(key) else {
             // Unknown slot: fail closed rather than flooding the bus.
+            // Count this as a suppression so the accounting invariant remains true.
+            self.stats.unknown_slot += 1;
             return false;
         };
 
-        if slot.last_raw == Some(raw) {
+        if slot.last_sent_raw == Some(raw) {
             self.stats.deduped += 1;
             return false;
         }
@@ -81,7 +84,7 @@ impl Limiter {
             return false;
         }
 
-        slot.last_raw = Some(raw);
+        slot.last_sent_raw = Some(raw);
         slot.last_sent_tick = Some(tick);
         self.stats.sent += 1;
         true
@@ -113,11 +116,12 @@ mod tests {
 
     #[test]
     fn identical_value_is_deduped_not_rate_limited() {
-        let mut l = limiter(0);
+        let mut l = limiter(10);
         assert!(l.admit(0, 64, 0));
-        assert!(!l.admit(0, 64, 100));
-        assert_eq!(l.stats().deduped, 1);
-        assert_eq!(l.stats().rate_limited, 0);
+        // Send same value within the rate-limit window to prove dedup is checked first
+        assert!(!l.admit(0, 64, 5), "identical value should be deduped even within window");
+        assert_eq!(l.stats().deduped, 1, "dedup must be counted");
+        assert_eq!(l.stats().rate_limited, 0, "dedup does not count as rate_limited");
     }
 
     #[test]

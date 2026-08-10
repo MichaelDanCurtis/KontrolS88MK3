@@ -1492,7 +1492,7 @@ The spec forbids silent throttling. This task makes suppression observable.
 - Produces:
   - `struct LimiterConfig { pub min_interval_ticks: u64 }` with `Default` of 10 (100 Hz per parameter at a 1 kHz tick)
   - `struct Limiter` with `new(LimiterConfig)`, `admit(&mut self, key: usize, raw: u16, tick: u64) -> bool`, `stats(&self) -> LimiterStats`, `reset(&mut self, slots: usize)`
-  - `struct LimiterStats { pub sent: u64, pub deduped: u64, pub rate_limited: u64 }`
+  - `struct LimiterStats { pub sent: u64, pub deduped: u64, pub rate_limited: u64, pub unknown_slot: u64 }`
 
 **Budget rationale:** DIN MIDI carries roughly 320 three-byte messages per second. The 10-tick default caps a single parameter at 100 messages/second, so three continuously-moving parameters approach the bus ceiling. Exceeding it does not corrupt output — it inflates `rate_limited`, which the runtime reports.
 
@@ -1503,10 +1503,16 @@ Create `crates/cr-midi/src/limiter.rs`:
 ```rust
 //! Per-parameter send budget.
 //!
-//! Two independent suppression reasons are tracked separately because they
-//! mean different things to a user: `deduped` means the value genuinely did
-//! not change, while `rate_limited` means real movement was discarded to fit
-//! the bus budget. The latter is the number that should worry someone.
+//! Suppression reasons are tracked separately because they mean different
+//! things to a user: `deduped` means the value genuinely did not change,
+//! `rate_limited` means real movement was discarded to fit the bus budget,
+//! and `unknown_slot` means a stale or invalid key — a programming error, not
+//! a bus-capacity problem. Conflating the last two would send someone
+//! simplifying their patch when the real fault is a bad key.
+//!
+//! Every `admit` call increments exactly one counter, so
+//! `sent + deduped + rate_limited + unknown_slot` equals the call count.
+//! That identity is what makes silent suppression impossible.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LimiterConfig {
@@ -1528,6 +1534,10 @@ pub struct LimiterStats {
     pub sent: u64,
     pub deduped: u64,
     pub rate_limited: u64,
+    /// Rejections caused by an out-of-range key. A programming error, not a
+    /// bus-capacity problem — counted separately so it is never mistaken for
+    /// throttling.
+    pub unknown_slot: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1568,7 +1578,9 @@ impl Limiter {
     /// Returns `true` to send. Allocation-free.
     pub fn admit(&mut self, key: usize, raw: u16, tick: u64) -> bool {
         let Some(slot) = self.slots.get_mut(key) else {
-            // Unknown slot: fail closed rather than flooding the bus.
+            // Unknown slot: fail closed rather than flooding the bus. Counted,
+            // because an uncounted rejection would be silent suppression.
+            self.stats.unknown_slot += 1;
             return false;
         };
 
@@ -2240,9 +2252,13 @@ fn every_suppressed_update_is_accounted_for() {
     let (_, stats) = run(ticks);
     // One sink fires once per tick, so the counters must sum to the tick count.
     assert_eq!(
-        stats.sent + stats.deduped + stats.rate_limited,
+        stats.sent + stats.deduped + stats.rate_limited + stats.unknown_slot,
         ticks,
         "suppression must never be silent"
+    );
+    assert_eq!(
+        stats.unknown_slot, 0,
+        "every sink resolves, so no key should be unknown"
     );
 }
 ```
@@ -2344,8 +2360,8 @@ fn main() -> Result<()> {
         if tick % 5000 == 0 {
             let s = rt.stats();
             println!(
-                "t={tick} sent={} deduped={} rate_limited={}",
-                s.sent, s.deduped, s.rate_limited
+                "t={tick} sent={} deduped={} rate_limited={} unknown_slot={}",
+                s.sent, s.deduped, s.rate_limited, s.unknown_slot
             );
         }
 
