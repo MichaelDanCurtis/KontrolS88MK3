@@ -33,7 +33,9 @@ impl Engine {
 
         for (i, node) in graph.nodes().iter().enumerate() {
             if let NodeSpec::Sink { device, param } = &node.spec {
-                sink_of_node[i] = Some(sinks.len());
+                if let Some(slot) = sink_of_node.get_mut(i) {
+                    *slot = Some(sinks.len());
+                }
                 sinks.push(SinkBinding {
                     device: device.clone(),
                     param: param.clone(),
@@ -179,8 +181,12 @@ mod tests {
     #[test]
     fn updates_carry_only_copy_data() {
         // A compile-time guard on the no-allocation constraint: if the update
-        // type ever regains an owned String, `Copy` stops being satisfied and
-        // this fails to build.
+        // element type ever regained an owned String, this line would fail to
+        // compile, since you cannot move a non-`Copy` value out of a `&[T]`
+        // index. `assert_copy::<(usize, f32)>()` below only checks a
+        // hardcoded literal type and would compile regardless of what
+        // `Engine::updates()` actually returns; the load-bearing check is the
+        // `let first: (usize, f32) = e.updates()[0];` move below.
         fn assert_copy<T: Copy>() {}
         assert_copy::<(usize, f32)>();
 
@@ -198,11 +204,35 @@ mod tests {
         let vlen = e.values.len();
         let sinks = e.sinks.len();
 
+        // A capacity comparison alone cannot catch a mutant that
+        // reallocates `updates` to the *same* capacity every tick (e.g.
+        // `self.updates = Vec::with_capacity(self.sinks.len())` in place of
+        // `self.updates.clear()`), since the resulting capacity is
+        // identical to the baseline. Capture the buffer's address after
+        // warmup and assert it never moves: a reallocation always changes
+        // the pointer, even when the capacity it lands on is unchanged.
+        //
+        // `as_ptr()` on a zero-capacity `Vec` returns a dangling alignment
+        // sentinel rather than a heap address, which would make the pointer
+        // check pass vacuously (the sentinel never "moves" either). Guard
+        // against that: the flagship graph has one sink, so capacity must
+        // be nonzero here.
+        assert!(
+            cap > 0,
+            "test graph must have at least one sink, or the pointer check below is vacuous"
+        );
+        let ptr = e.updates.as_ptr();
+
         for t in 1..10_000u64 {
             e.tick(t);
         }
 
         assert_eq!(e.updates.capacity(), cap, "updates buffer reallocated");
+        assert_eq!(
+            e.updates.as_ptr(),
+            ptr,
+            "updates buffer moved (reallocated), even though capacity is unchanged"
+        );
         assert_eq!(e.values.len(), vlen, "values buffer resized");
         assert_eq!(e.sinks.len(), sinks, "sink table must be built once only");
     }
