@@ -226,6 +226,38 @@ mod tests {
     }
 
     #[test]
+    fn rejects_self_loop() {
+        // A node whose `input` is itself: the degenerate one-node cycle.
+        let g = Graph {
+            nodes: vec![scale("a", "a")],
+        };
+        assert_eq!(compile(&g), Err(CompileError::Cycle(NodeId::new("a"))));
+    }
+
+    #[test]
+    fn compiles_fan_out_with_shared_upstream_before_both_dependents() {
+        // Two sinks reading the same upstream lfo node.
+        let g = Graph {
+            nodes: vec![lfo("l"), sink("s1", "l"), sink("s2", "l")],
+        };
+        let c = compile(&g).expect("fan-out must compile");
+
+        let order = c.order();
+        assert_eq!(order.len(), 3, "every node must appear in the order");
+        let mut sorted = order.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            vec![0, 1, 2],
+            "every node must appear exactly once, with no gaps"
+        );
+
+        let pos = |idx: usize| order.iter().position(|&x| x == idx).unwrap();
+        assert!(pos(0) < pos(1), "shared upstream must precede first sink");
+        assert!(pos(0) < pos(2), "shared upstream must precede second sink");
+    }
+
+    #[test]
     fn rejects_non_positive_lfo_freq() {
         let g = Graph {
             nodes: vec![GraphNode {

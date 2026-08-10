@@ -17,30 +17,55 @@ pub struct Runtime {
     device: DeviceConfig,
     sink: Box<dyn MidiSink>,
     limiter: Limiter,
-    /// Indexed by the engine's sink index. `None` means the graph referenced a
-    /// parameter the pack does not define.
+    /// Indexed by the engine's sink index. `None` means the sink did not
+    /// resolve (unknown parameter or device mismatch). `Runtime::new`
+    /// refuses to construct a `Runtime` at all when that happens, so by the
+    /// time one exists every entry here is `Some` — the `Option` stays only
+    /// so `run_ticks` never has to trust that invariant blindly.
     resolved: Vec<Option<ResolvedSink>>,
     /// Scratch buffer reused every tick so encoding never allocates.
     scratch: Vec<u8>,
     /// Parameter names referenced by the graph but absent from the pack.
-    /// Collected once at construction, never during a tick.
+    /// Collected once at construction, never during a tick. Always empty on
+    /// a successfully constructed `Runtime`; a nonempty list makes
+    /// construction fail instead.
     pub unknown_params: Vec<String>,
+    /// Sink `device` values that do not match the configured
+    /// `DeviceConfig.id`. Collected once at construction, never during a
+    /// tick. Always empty on a successfully constructed `Runtime`; a
+    /// nonempty list makes construction fail instead.
+    pub mismatched_devices: Vec<String>,
 }
 
 impl Runtime {
+    /// Build a runtime from a compiled graph, resolving every sink against
+    /// the pack and the configured device up front.
+    ///
+    /// Fails if any sink names a parameter absent from the pack, or a
+    /// device that does not match `device.id`: unresolvable graphs must
+    /// never reach the tick thread, so construction is where that
+    /// invariant is enforced. A sink naming an unknown device is treated as
+    /// unresolved rather than silently routed to the configured device.
     pub fn new(
         graph: CompiledGraph,
         pack: DevicePack,
         device: DeviceConfig,
         sink: Box<dyn MidiSink>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let engine = Engine::new(graph);
 
-        // Resolve every sink against the pack up front. After this, the tick
-        // does no name lookup, no hashing, and no allocation.
+        // Resolve every sink against the pack and device up front. After
+        // this, the tick does no name lookup, no hashing, and no
+        // allocation.
         let mut resolved = Vec::with_capacity(engine.sinks().len());
         let mut unknown_params = Vec::new();
+        let mut mismatched_devices = Vec::new();
         for binding in engine.sinks() {
+            if binding.device.as_str() != device.id.as_str() {
+                mismatched_devices.push(binding.device.as_str().to_string());
+                resolved.push(None);
+                continue;
+            }
             match pack.parameter(binding.param.as_str()) {
                 Some(p) => resolved.push(Some(ResolvedSink {
                     param: p.clone(),
@@ -53,11 +78,19 @@ impl Runtime {
             }
         }
 
+        if !unknown_params.is_empty() || !mismatched_devices.is_empty() {
+            anyhow::bail!(
+                "patch has unresolvable sinks for configured device `{}`: \
+                 unknown parameters {unknown_params:?}, mismatched devices {mismatched_devices:?}",
+                device.id,
+            );
+        }
+
         // One limiter slot per sink, so budgets are per graph sink.
         let mut limiter = Limiter::new(LimiterConfig::default());
         limiter.reset(resolved.len());
 
-        Self {
+        Ok(Self {
             engine,
             device,
             sink,
@@ -65,7 +98,8 @@ impl Runtime {
             resolved,
             scratch: Vec::with_capacity(16),
             unknown_params,
-        }
+            mismatched_devices,
+        })
     }
 
     /// Run `count` ticks starting at `from`. Deterministic: reads no clock.

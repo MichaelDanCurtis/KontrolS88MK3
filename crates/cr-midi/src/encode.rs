@@ -25,6 +25,17 @@ pub fn quantize(value: f32, min: f32, max: f32, bits: u8) -> u16 {
 }
 
 /// Append the MIDI bytes for `raw` on `channel` (0-15) to `out`.
+///
+/// # Precondition
+///
+/// For `Encoding::Cc14 { msb_cc }`, the caller must ensure `msb_cc <= 95`.
+/// The LSB byte always lands on `msb_cc + 32`, and this function performs no
+/// range check of its own — that guard lives upstream, in
+/// `cr_packs::DevicePack::validate`. If called directly with `msb_cc > 95`,
+/// `msb_cc.wrapping_add(32) & 0x7F` wraps around instead of overflowing, so
+/// the LSB silently lands on an unrelated low-numbered CC. For example,
+/// `msb_cc: 96` sends the LSB to CC 0 (Bank Select MSB) — a different and
+/// potentially destructive control change, not a benign no-op.
 pub fn encode(enc: &Encoding, channel: u8, raw: u16, out: &mut Vec<u8>) {
     let ch = channel & 0x0F;
     let status = 0xB0 | ch;

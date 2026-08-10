@@ -48,7 +48,8 @@ fn main() -> Result<()> {
         Box::new(MidirSink::open(&cfg.device.port)?)
     };
 
-    let mut rt = runtime::Runtime::new(graph, pack, cfg.device.clone(), sink);
+    let mut rt = runtime::Runtime::new(graph, pack, cfg.device.clone(), sink)
+        .context("constructing runtime")?;
     println!("running {path} at 1 kHz; ctrl-c to stop");
 
     let start = Instant::now();
@@ -56,13 +57,6 @@ fn main() -> Result<()> {
     loop {
         rt.run_ticks(tick, BATCH)?;
         tick += BATCH;
-
-        if !rt.unknown_params.is_empty() {
-            anyhow::bail!(
-                "patch references parameters missing from the pack: {:?}",
-                rt.unknown_params
-            );
-        }
 
         // Report the bus budget every 5 seconds. Suppression is never silent.
         if tick.is_multiple_of(5000) {
