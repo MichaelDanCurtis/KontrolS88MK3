@@ -1,9 +1,15 @@
 //! Per-parameter send budget.
 //!
-//! Two independent suppression reasons are tracked separately because they
-//! mean different things to a user: `deduped` means the value genuinely did
-//! not change, while `rate_limited` means real movement was discarded to fit
-//! the bus budget. The latter is the number that should worry someone.
+//! Suppression reasons are tracked separately because they mean different
+//! things to a user: `deduped` means the value genuinely did not change,
+//! `rate_limited` means real movement was discarded to fit the bus budget,
+//! and `unknown_slot` means a stale or invalid key — a programming error, not
+//! a bus-capacity problem. Conflating the last two would send someone
+//! simplifying their patch when the real fault is a bad key.
+//!
+//! Every `admit` call increments exactly one counter, so
+//! `sent + deduped + rate_limited + unknown_slot` equals the call count.
+//! That identity is what makes silent suppression impossible.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LimiterConfig {
