@@ -737,8 +737,15 @@ git commit -m "feat(engine): deterministic drift-free LFO derived from tick inde
 **Interfaces:**
 - Consumes: `lfo_value`, `TICK_HZ` from Task 3; `CompiledGraph`, `NodeSpec` from Task 2
 - Produces:
-  - `struct ParamUpdate { pub device: DeviceId, pub param: ParamName, pub value: f32 }`
-  - `struct Engine` with `new(CompiledGraph)`, `tick(&mut self, tick: u64)`, `updates(&self) -> &[ParamUpdate]`, `value(&self, idx: usize) -> f32`
+  - `struct SinkBinding { pub device: DeviceId, pub param: ParamName }`
+  - `struct Engine` with `new(CompiledGraph)`, `tick(&mut self, tick: u64)`, `updates(&self) -> &[(usize, f32)]`, `sinks(&self) -> &[SinkBinding]`, `sink(&self, i: usize) -> Option<&SinkBinding>`, `value(&self, idx: usize) -> f32`
+
+**Why updates are `(usize, f32)` and not owned names:** `DeviceId` and `ParamName`
+wrap `String`, so cloning them into a per-tick update struct would heap-allocate
+twice per sink per tick — 2000 allocations/second at 1 kHz — violating the
+no-allocation constraint. Instead `Engine::new` builds the `SinkBinding` table
+once, and the tick emits `(sink_index, value)` pairs, which are `Copy`.
+Consumers resolve names through `sink(i)` outside the hot path.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -751,28 +758,50 @@ pub use nodes::{lfo_value, TICK_HZ};
 
 use cr_core::{CompiledGraph, DeviceId, NodeSpec, ParamName};
 
-/// A parameter value produced by a sink on a given tick, before encoding.
+/// Where a sink sends its value. Built once when the graph is applied, never
+/// cloned during a tick.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ParamUpdate {
+pub struct SinkBinding {
     pub device: DeviceId,
     pub param: ParamName,
-    pub value: f32,
 }
 
 /// Evaluates a compiled graph. Holds no clock and allocates nothing per tick.
 pub struct Engine {
     graph: CompiledGraph,
     values: Vec<f32>,
-    updates: Vec<ParamUpdate>,
+    /// Sink destinations, indexed by sink number. Built once in `new`.
+    sinks: Vec<SinkBinding>,
+    /// `(sink index, value)` produced by the most recent tick. Both fields are
+    /// `Copy`, so pushing one never allocates.
+    updates: Vec<(usize, f32)>,
+    /// Maps node index -> sink index, so the tick needs no name lookup.
+    sink_of_node: Vec<Option<usize>>,
 }
 
 impl Engine {
     pub fn new(graph: CompiledGraph) -> Self {
         let n = graph.len();
+        let mut sinks = Vec::new();
+        let mut sink_of_node = vec![None; n];
+
+        for (i, node) in graph.nodes().iter().enumerate() {
+            if let NodeSpec::Sink { device, param } = &node.spec {
+                sink_of_node[i] = Some(sinks.len());
+                sinks.push(SinkBinding {
+                    device: device.clone(),
+                    param: param.clone(),
+                });
+            }
+        }
+
+        let sink_count = sinks.len();
         Self {
             graph,
             values: vec![0.0; n],
-            updates: Vec::with_capacity(n),
+            sinks,
+            updates: Vec::with_capacity(sink_count),
+            sink_of_node,
         }
     }
 
@@ -798,12 +827,11 @@ impl Engine {
             let out = match &node.spec {
                 NodeSpec::Lfo { shape, freq_hz } => lfo_value(*shape, *freq_hz, tick),
                 NodeSpec::Scale { min, max } => min + input.clamp(0.0, 1.0) * (max - min),
-                NodeSpec::Sink { device, param } => {
-                    self.updates.push(ParamUpdate {
-                        device: device.clone(),
-                        param: param.clone(),
-                        value: input,
-                    });
+                NodeSpec::Sink { .. } => {
+                    // Push only Copy data: no allocation, no string cloning.
+                    if let Some(Some(sink_idx)) = self.sink_of_node.get(i) {
+                        self.updates.push((*sink_idx, input));
+                    }
                     input
                 }
             };
@@ -814,9 +842,19 @@ impl Engine {
         }
     }
 
-    /// Parameter updates produced by the most recent `tick`.
-    pub fn updates(&self) -> &[ParamUpdate] {
+    /// `(sink index, value)` pairs produced by the most recent `tick`.
+    /// Resolve indices to destinations with `sink()`, outside the hot path.
+    pub fn updates(&self) -> &[(usize, f32)] {
         &self.updates
+    }
+
+    /// All sink destinations, indexed by sink number.
+    pub fn sinks(&self) -> &[SinkBinding] {
+        &self.sinks
+    }
+
+    pub fn sink(&self, i: usize) -> Option<&SinkBinding> {
+        self.sinks.get(i)
     }
 
     pub fn value(&self, idx: usize) -> f32 {
@@ -871,24 +909,39 @@ mod tests {
         // tick 0: lfo 0.0 -> scale 20.0
         e.tick(0);
         assert_eq!(e.updates().len(), 1);
-        assert!((e.updates()[0].value - 20.0).abs() < EPS);
+        assert!((e.updates()[0].1 - 20.0).abs() < EPS);
 
         // tick 500: lfo 1.0 -> scale 90.0
         e.tick(500);
-        assert!((e.updates()[0].value - 90.0).abs() < EPS);
+        assert!((e.updates()[0].1 - 90.0).abs() < EPS);
 
         // tick 250: lfo 0.5 -> scale 55.0
         e.tick(250);
-        assert!((e.updates()[0].value - 55.0).abs() < EPS);
+        assert!((e.updates()[0].1 - 55.0).abs() < EPS);
     }
 
     #[test]
-    fn sink_update_carries_device_and_param() {
+    fn sink_index_resolves_to_device_and_param() {
         let mut e = flagship();
         e.tick(0);
-        let u = &e.updates()[0];
-        assert_eq!(u.device, DeviceId::new("peak"));
-        assert_eq!(u.param, ParamName::new("filter.cutoff"));
+        let (sink_idx, _) = e.updates()[0];
+        let binding = e.sink(sink_idx).expect("sink index must resolve");
+        assert_eq!(binding.device, DeviceId::new("peak"));
+        assert_eq!(binding.param, ParamName::new("filter.cutoff"));
+    }
+
+    #[test]
+    fn updates_carry_only_copy_data() {
+        // A compile-time guard on the no-allocation constraint: if the update
+        // type ever regains an owned String, `Copy` stops being satisfied and
+        // this fails to build.
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<(usize, f32)>();
+
+        let mut e = flagship();
+        e.tick(0);
+        let first: (usize, f32) = e.updates()[0];
+        assert_eq!(first.0, 0);
     }
 
     #[test]
@@ -897,6 +950,7 @@ mod tests {
         e.tick(0);
         let cap = e.updates.capacity();
         let vlen = e.values.len();
+        let sinks = e.sinks.len();
 
         for t in 1..10_000u64 {
             e.tick(t);
@@ -904,6 +958,7 @@ mod tests {
 
         assert_eq!(e.updates.capacity(), cap, "updates buffer reallocated");
         assert_eq!(e.values.len(), vlen, "values buffer resized");
+        assert_eq!(e.sinks.len(), sinks, "sink table must be built once only");
     }
 
     #[test]
@@ -916,7 +971,7 @@ mod tests {
             b.tick(t);
         }
         b.tick(12_345);
-        assert!((a.updates()[0].value - b.updates()[0].value).abs() < EPS);
+        assert!((a.updates()[0].1 - b.updates()[0].1).abs() < EPS);
     }
 }
 ```
@@ -1972,20 +2027,26 @@ use crate::config::DeviceConfig;
 use cr_core::CompiledGraph;
 use cr_engine::Engine;
 use cr_midi::{encode, quantize, resolution_bits, Limiter, LimiterConfig, LimiterStats, MidiSink};
-use cr_packs::DevicePack;
-use std::collections::HashMap;
+use cr_packs::{DevicePack, Parameter};
+
+/// A sink resolved against the device pack once, at construction.
+struct ResolvedSink {
+    param: Parameter,
+    bits: u8,
+}
 
 pub struct Runtime {
     engine: Engine,
-    pack: DevicePack,
     device: DeviceConfig,
     sink: Box<dyn MidiSink>,
     limiter: Limiter,
-    /// Stable slot index per parameter name, assigned once at construction.
-    slots: HashMap<String, usize>,
+    /// Indexed by the engine's sink index. `None` means the graph referenced a
+    /// parameter the pack does not define.
+    resolved: Vec<Option<ResolvedSink>>,
     /// Scratch buffer reused every tick so encoding never allocates.
     scratch: Vec<u8>,
     /// Parameter names referenced by the graph but absent from the pack.
+    /// Collected once at construction, never during a tick.
     pub unknown_params: Vec<String>,
 }
 
@@ -1996,24 +2057,37 @@ impl Runtime {
         device: DeviceConfig,
         sink: Box<dyn MidiSink>,
     ) -> Self {
-        // Assign a limiter slot to every parameter the pack knows about, so
-        // slot indices are stable and no allocation happens during a tick.
-        let mut slots = HashMap::new();
-        for (i, name) in pack.parameters.keys().enumerate() {
-            slots.insert(name.clone(), i);
+        let engine = Engine::new(graph);
+
+        // Resolve every sink against the pack up front. After this, the tick
+        // does no name lookup, no hashing, and no allocation.
+        let mut resolved = Vec::with_capacity(engine.sinks().len());
+        let mut unknown_params = Vec::new();
+        for binding in engine.sinks() {
+            match pack.parameter(binding.param.as_str()) {
+                Some(p) => resolved.push(Some(ResolvedSink {
+                    param: p.clone(),
+                    bits: resolution_bits(&p.encoding),
+                })),
+                None => {
+                    unknown_params.push(binding.param.as_str().to_string());
+                    resolved.push(None);
+                }
+            }
         }
+
+        // One limiter slot per sink, so budgets are per graph sink.
         let mut limiter = Limiter::new(LimiterConfig::default());
-        limiter.reset(slots.len());
+        limiter.reset(resolved.len());
 
         Self {
-            engine: Engine::new(graph),
-            pack,
+            engine,
             device,
             sink,
             limiter,
-            slots,
+            resolved,
             scratch: Vec::with_capacity(16),
-            unknown_params: Vec::new(),
+            unknown_params,
         }
     }
 
@@ -2022,27 +2096,21 @@ impl Runtime {
         for tick in from..from.saturating_add(count) {
             self.engine.tick(tick);
 
-            for update in self.engine.updates() {
-                let name = update.param.as_str();
-                let (Some(param), Some(&slot)) =
-                    (self.pack.parameter(name), self.slots.get(name))
-                else {
-                    if !self.unknown_params.iter().any(|p| p == name) {
-                        self.unknown_params.push(name.to_string());
-                    }
+            for &(sink_idx, value) in self.engine.updates() {
+                let Some(Some(r)) = self.resolved.get(sink_idx) else {
+                    // Unknown parameter: reported via `unknown_params`.
                     continue;
                 };
 
-                let bits = resolution_bits(&param.encoding);
-                let raw = quantize(update.value, param.min, param.max, bits);
+                let raw = quantize(value, r.param.min, r.param.max, r.bits);
 
-                if !self.limiter.admit(slot, raw, tick) {
+                if !self.limiter.admit(sink_idx, raw, tick) {
                     continue;
                 }
 
                 self.scratch.clear();
                 encode(
-                    &param.encoding,
+                    &r.param.encoding,
                     self.device.wire_channel(),
                     raw,
                     &mut self.scratch,
