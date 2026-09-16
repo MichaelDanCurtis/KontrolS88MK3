@@ -167,7 +167,13 @@ impl Runtime {
                 // NRPN encode to multiple three-byte CC messages, so emit each
                 // one separately while keeping the limiter decision atomic at
                 // the semantic-update level.
-                for message in self.scratch.chunks_exact(3) {
+                //
+                // Every encoding this crate produces is a whole number of
+                // three-byte messages, so the remainder is always empty; it is
+                // discarded rather than sent, because a partial MIDI message on
+                // the wire would corrupt the stream.
+                let (messages, _remainder) = self.scratch.as_chunks::<3>();
+                for message in messages {
                     endpoint.sink.send(message)?;
                 }
             }
