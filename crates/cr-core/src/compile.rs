@@ -6,13 +6,16 @@
 
 use crate::NodeId;
 use crate::error::CompileError;
-use crate::graph::{Graph, NodeSpec};
-use std::collections::HashMap;
+use crate::graph::{Graph, MathOperation, NodeSpec};
+use std::collections::{HashMap, VecDeque};
+
+pub const MAX_STEP_SEQUENCE_VALUES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledNode {
     pub spec: NodeSpec,
     pub input: Option<usize>,
+    pub control: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +62,126 @@ pub fn compile(graph: &Graph) -> Result<CompiledGraph, CompileError> {
                     });
                 }
             }
+            NodeSpec::SampleHold { rate_hz, .. } => {
+                if !rate_hz.is_finite() || *rate_hz <= 0.0 {
+                    return Err(CompileError::InvalidSampleHoldRate {
+                        node: n.id.clone(),
+                        rate: *rate_hz,
+                    });
+                }
+            }
+            NodeSpec::StepSequence { rate_hz, values } => {
+                if !rate_hz.is_finite() || *rate_hz <= 0.0 {
+                    return Err(CompileError::InvalidStepSequenceRate {
+                        node: n.id.clone(),
+                        rate: *rate_hz,
+                    });
+                }
+                if values.is_empty() {
+                    return Err(CompileError::EmptyStepSequence { node: n.id.clone() });
+                }
+                if values.len() > MAX_STEP_SEQUENCE_VALUES {
+                    return Err(CompileError::StepSequenceTooLong {
+                        node: n.id.clone(),
+                        count: values.len(),
+                        max: MAX_STEP_SEQUENCE_VALUES,
+                    });
+                }
+                if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+                    return Err(CompileError::InvalidStepSequenceValue {
+                        node: n.id.clone(),
+                        index,
+                    });
+                }
+            }
+            NodeSpec::Slew {
+                rise_per_second,
+                fall_per_second,
+            } => {
+                if !rise_per_second.is_finite()
+                    || *rise_per_second <= 0.0
+                    || !fall_per_second.is_finite()
+                    || *fall_per_second <= 0.0
+                {
+                    return Err(CompileError::InvalidSlewRate {
+                        node: n.id.clone(),
+                        rise: *rise_per_second,
+                        fall: *fall_per_second,
+                    });
+                }
+            }
+            NodeSpec::Clamp { min, max } => {
+                if !min.is_finite() || !max.is_finite() || min >= max {
+                    return Err(CompileError::InvalidClampRange {
+                        node: n.id.clone(),
+                        min: *min,
+                        max: *max,
+                    });
+                }
+            }
+            NodeSpec::Curve { exponent } => {
+                if !exponent.is_finite() || *exponent <= 0.0 {
+                    return Err(CompileError::InvalidCurveExponent {
+                        node: n.id.clone(),
+                        exponent: *exponent,
+                    });
+                }
+            }
+            NodeSpec::Quantize { steps } => {
+                if *steps < 2 {
+                    return Err(CompileError::InvalidQuantizeSteps {
+                        node: n.id.clone(),
+                        steps: *steps,
+                    });
+                }
+            }
+            NodeSpec::Math { operation, operand } => {
+                if !operand.is_finite() {
+                    return Err(CompileError::InvalidMathOperand {
+                        node: n.id.clone(),
+                        operand: *operand,
+                    });
+                }
+                if matches!(operation, MathOperation::Divide) && *operand == 0.0 {
+                    return Err(CompileError::DivisionByZero { node: n.id.clone() });
+                }
+            }
+            NodeSpec::Envelope {
+                attack_seconds,
+                decay_seconds,
+                sustain,
+                release_seconds,
+                ..
+            } => {
+                if !attack_seconds.is_finite()
+                    || *attack_seconds < 0.0
+                    || !decay_seconds.is_finite()
+                    || *decay_seconds < 0.0
+                    || !sustain.is_finite()
+                    || !(0.0..=1.0).contains(sustain)
+                    || !release_seconds.is_finite()
+                    || *release_seconds < 0.0
+                {
+                    return Err(CompileError::InvalidEnvelope {
+                        node: n.id.clone(),
+                        attack: *attack_seconds,
+                        decay: *decay_seconds,
+                        sustain: *sustain,
+                        release: *release_seconds,
+                    });
+                }
+            }
+            NodeSpec::Macro { binding, default } => {
+                if binding.as_str().trim().is_empty() {
+                    return Err(CompileError::EmptyBinding { node: n.id.clone() });
+                }
+                if !default.is_finite() {
+                    return Err(CompileError::InvalidExternalDefault {
+                        node: n.id.clone(),
+                        value: *default,
+                    });
+                }
+            }
             NodeSpec::Scale { min, max } => {
                 if !min.is_finite() || !max.is_finite() || min >= max {
                     return Err(CompileError::InvalidScaleRange {
@@ -69,6 +192,30 @@ pub fn compile(graph: &Graph) -> Result<CompiledGraph, CompileError> {
                 }
             }
             NodeSpec::Sink { .. } => {}
+            NodeSpec::ExternalSource { binding, default } => {
+                if binding.as_str().trim().is_empty() {
+                    return Err(CompileError::EmptyBinding { node: n.id.clone() });
+                }
+                if !default.is_finite() {
+                    return Err(CompileError::InvalidExternalDefault {
+                        node: n.id.clone(),
+                        value: *default,
+                    });
+                }
+            }
+            NodeSpec::ExternalSink { binding } => {
+                if binding.as_str().trim().is_empty() {
+                    return Err(CompileError::EmptyBinding { node: n.id.clone() });
+                }
+            }
+            NodeSpec::Takeover { pickup_epsilon, .. } => {
+                if !pickup_epsilon.is_finite() || *pickup_epsilon < 0.0 || *pickup_epsilon > 1.0 {
+                    return Err(CompileError::InvalidPickupEpsilon {
+                        node: n.id.clone(),
+                        value: *pickup_epsilon,
+                    });
+                }
+            }
         }
 
         let input = match &n.input {
@@ -79,9 +226,27 @@ pub fn compile(graph: &Graph) -> Result<CompiledGraph, CompileError> {
             })?),
         };
 
+        let control =
+            match &n.spec {
+                NodeSpec::Takeover { control, .. } => Some(*index.get(control).ok_or_else(
+                    || CompileError::UnknownControl {
+                        node: n.id.clone(),
+                        control: control.clone(),
+                    },
+                )?),
+                NodeSpec::Envelope { gate, .. } => {
+                    Some(*index.get(gate).ok_or_else(|| CompileError::UnknownGate {
+                        node: n.id.clone(),
+                        gate: gate.clone(),
+                    })?)
+                }
+                _ => None,
+            };
+
         nodes.push(CompiledNode {
             spec: n.spec.clone(),
             input,
+            control,
         });
     }
 
@@ -89,53 +254,54 @@ pub fn compile(graph: &Graph) -> Result<CompiledGraph, CompileError> {
     Ok(CompiledGraph { nodes, order })
 }
 
-/// Depth-first topological sort. Each node has at most one input in M1, so
-/// this walks a forest of chains; `state` guards against cycles.
+/// Kahn topological sort over primary inputs and auxiliary control inputs.
 fn topo_order(
     nodes: &[CompiledNode],
     original: &[crate::graph::GraphNode],
 ) -> Result<Vec<usize>, CompileError> {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Mark {
-        Unvisited,
-        InProgress,
-        Done,
+    let mut indegree = vec![0usize; nodes.len()];
+    let mut dependents = vec![Vec::new(); nodes.len()];
+    for (node_idx, node) in nodes.iter().enumerate() {
+        for dependency in [node.input, node.control].into_iter().flatten() {
+            indegree[node_idx] = indegree[node_idx].saturating_add(1);
+            if let Some(edges) = dependents.get_mut(dependency) {
+                edges.push(node_idx);
+            }
+        }
     }
-
-    let mut state = vec![Mark::Unvisited; nodes.len()];
+    let mut ready: VecDeque<usize> = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &degree)| (degree == 0).then_some(idx))
+        .collect();
     let mut order = Vec::with_capacity(nodes.len());
-
-    for start in 0..nodes.len() {
-        // Iterative walk up the input chain, then emit on the way back down.
-        let mut stack: Vec<usize> = Vec::new();
-        let mut cursor = Some(start);
-
-        while let Some(i) = cursor {
-            match state[i] {
-                Mark::Done => break,
-                Mark::InProgress => {
-                    return Err(CompileError::Cycle(original[i].id.clone()));
-                }
-                Mark::Unvisited => {
-                    state[i] = Mark::InProgress;
-                    stack.push(i);
-                    cursor = nodes[i].input;
+    while let Some(node_idx) = ready.pop_front() {
+        order.push(node_idx);
+        for &dependent in dependents.get(node_idx).into_iter().flatten() {
+            if let Some(degree) = indegree.get_mut(dependent) {
+                *degree = degree.saturating_sub(1);
+                if *degree == 0 {
+                    ready.push_back(dependent);
                 }
             }
         }
-
-        while let Some(i) = stack.pop() {
-            state[i] = Mark::Done;
-            order.push(i);
-        }
     }
-
+    if order.len() != nodes.len() {
+        let cycle = indegree
+            .iter()
+            .position(|&degree| degree > 0)
+            .and_then(|idx| original.get(idx))
+            .map(|node| node.id.clone())
+            .unwrap_or_else(|| NodeId::new("unknown"));
+        return Err(CompileError::Cycle(cycle));
+    }
     Ok(order)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BindingId;
     use crate::graph::{GraphNode, LfoShape};
     use crate::{DeviceId, ParamName};
 
@@ -276,6 +442,180 @@ mod tests {
     }
 
     #[test]
+    fn validates_sample_hold_rate() {
+        let graph = Graph {
+            nodes: vec![GraphNode {
+                id: NodeId::new("random"),
+                spec: NodeSpec::SampleHold {
+                    rate_hz: 0.0,
+                    seed: 42,
+                },
+                input: None,
+            }],
+        };
+        assert!(matches!(
+            compile(&graph),
+            Err(CompileError::InvalidSampleHoldRate { .. })
+        ));
+    }
+
+    #[test]
+    fn validates_step_sequence_rate_length_and_values() {
+        let node = |rate_hz, values| Graph {
+            nodes: vec![GraphNode {
+                id: NodeId::new("steps"),
+                spec: NodeSpec::StepSequence { rate_hz, values },
+                input: None,
+            }],
+        };
+        assert!(matches!(
+            compile(&node(0.0, vec![0.0])),
+            Err(CompileError::InvalidStepSequenceRate { .. })
+        ));
+        assert!(matches!(
+            compile(&node(1.0, vec![])),
+            Err(CompileError::EmptyStepSequence { .. })
+        ));
+        assert!(matches!(
+            compile(&node(1.0, vec![0.0; MAX_STEP_SEQUENCE_VALUES + 1])),
+            Err(CompileError::StepSequenceTooLong { .. })
+        ));
+        assert!(matches!(
+            compile(&node(1.0, vec![0.0, f32::NAN])),
+            Err(CompileError::InvalidStepSequenceValue { index: 1, .. })
+        ));
+        assert!(compile(&node(2.0, vec![0.0, 0.5, 1.0])).is_ok());
+    }
+
+    #[test]
+    fn validates_transform_parameters() {
+        let graph = |spec| Graph {
+            nodes: vec![GraphNode {
+                id: NodeId::new("transform"),
+                spec,
+                input: None,
+            }],
+        };
+        assert!(matches!(
+            compile(&graph(NodeSpec::Slew {
+                rise_per_second: 0.0,
+                fall_per_second: 1.0,
+            })),
+            Err(CompileError::InvalidSlewRate { .. })
+        ));
+        assert!(matches!(
+            compile(&graph(NodeSpec::Clamp { min: 1.0, max: 1.0 })),
+            Err(CompileError::InvalidClampRange { .. })
+        ));
+        assert!(matches!(
+            compile(&graph(NodeSpec::Curve { exponent: f32::NAN })),
+            Err(CompileError::InvalidCurveExponent { .. })
+        ));
+        assert!(matches!(
+            compile(&graph(NodeSpec::Quantize { steps: 1 })),
+            Err(CompileError::InvalidQuantizeSteps { .. })
+        ));
+        assert!(matches!(
+            compile(&graph(NodeSpec::Math {
+                operation: MathOperation::Divide,
+                operand: 0.0,
+            })),
+            Err(CompileError::DivisionByZero { .. })
+        ));
+        assert!(matches!(
+            compile(&graph(NodeSpec::Math {
+                operation: MathOperation::Add,
+                operand: f32::INFINITY,
+            })),
+            Err(CompileError::InvalidMathOperand { .. })
+        ));
+    }
+
+    #[test]
+    fn envelope_validates_and_orders_its_gate_dependency() {
+        let graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: NodeId::new("env"),
+                    spec: NodeSpec::Envelope {
+                        gate: NodeId::new("gate"),
+                        attack_seconds: 0.1,
+                        decay_seconds: 0.2,
+                        sustain: 0.6,
+                        release_seconds: 0.3,
+                    },
+                    input: None,
+                },
+                GraphNode {
+                    id: NodeId::new("gate"),
+                    spec: NodeSpec::Macro {
+                        binding: BindingId::new("gate"),
+                        default: 0.0,
+                    },
+                    input: None,
+                },
+            ],
+        };
+        let compiled = compile(&graph).unwrap();
+        assert_eq!(compiled.nodes()[0].control, Some(1));
+        assert_eq!(compiled.order(), &[1, 0]);
+
+        let invalid = Graph {
+            nodes: vec![GraphNode {
+                id: NodeId::new("env"),
+                spec: NodeSpec::Envelope {
+                    gate: NodeId::new("missing"),
+                    attack_seconds: -1.0,
+                    decay_seconds: 0.0,
+                    sustain: 2.0,
+                    release_seconds: 0.0,
+                },
+                input: None,
+            }],
+        };
+        assert!(matches!(
+            compile(&invalid),
+            Err(CompileError::InvalidEnvelope { .. })
+        ));
+
+        let unknown = Graph {
+            nodes: vec![GraphNode {
+                id: NodeId::new("env"),
+                spec: NodeSpec::Envelope {
+                    gate: NodeId::new("missing"),
+                    attack_seconds: 0.1,
+                    decay_seconds: 0.1,
+                    sustain: 0.5,
+                    release_seconds: 0.1,
+                },
+                input: None,
+            }],
+        };
+        assert!(matches!(
+            compile(&unknown),
+            Err(CompileError::UnknownGate { .. })
+        ));
+
+        let cycle = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: NodeId::new("env"),
+                    spec: NodeSpec::Envelope {
+                        gate: NodeId::new("scaled"),
+                        attack_seconds: 0.1,
+                        decay_seconds: 0.1,
+                        sustain: 0.5,
+                        release_seconds: 0.1,
+                    },
+                    input: None,
+                },
+                scale("scaled", "env"),
+            ],
+        };
+        assert!(matches!(compile(&cycle), Err(CompileError::Cycle(_))));
+    }
+
+    #[test]
     fn rejects_inverted_scale_range() {
         let g = Graph {
             nodes: vec![GraphNode {
@@ -302,5 +642,131 @@ mod tests {
         assert_eq!(c.nodes().len(), 1);
         assert_eq!(c.order(), &[0]);
         assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn validates_external_bindings_and_defaults() {
+        let empty = Graph {
+            nodes: vec![GraphNode {
+                id: NodeId::new("input"),
+                spec: NodeSpec::ExternalSource {
+                    binding: BindingId::new(""),
+                    default: 0.0,
+                },
+                input: None,
+            }],
+        };
+        assert!(matches!(
+            compile(&empty),
+            Err(CompileError::EmptyBinding { .. })
+        ));
+
+        let non_finite = Graph {
+            nodes: vec![GraphNode {
+                id: NodeId::new("input"),
+                spec: NodeSpec::ExternalSource {
+                    binding: BindingId::new("osc.in"),
+                    default: f32::NAN,
+                },
+                input: None,
+            }],
+        };
+        assert!(matches!(
+            compile(&non_finite),
+            Err(CompileError::InvalidExternalDefault { .. })
+        ));
+    }
+
+    #[test]
+    fn takeover_orders_both_dependencies_before_it() {
+        let graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: NodeId::new("pickup"),
+                    spec: NodeSpec::Takeover {
+                        control: NodeId::new("knob"),
+                        pickup_epsilon: 0.01,
+                    },
+                    input: Some(NodeId::new("modulation")),
+                },
+                lfo("modulation"),
+                GraphNode {
+                    id: NodeId::new("knob"),
+                    spec: NodeSpec::ExternalSource {
+                        binding: BindingId::new("s88.knob.1"),
+                        default: 0.0,
+                    },
+                    input: None,
+                },
+            ],
+        };
+        let compiled = compile(&graph).expect("takeover graph must compile");
+        let pos = |idx: usize| {
+            compiled
+                .order()
+                .iter()
+                .position(|&candidate| candidate == idx)
+                .unwrap()
+        };
+        assert!(pos(1) < pos(0));
+        assert!(pos(2) < pos(0));
+        assert_eq!(compiled.nodes()[0].control, Some(2));
+    }
+
+    #[test]
+    fn takeover_rejects_unknown_control_and_invalid_epsilon() {
+        let unknown = Graph {
+            nodes: vec![GraphNode {
+                id: NodeId::new("pickup"),
+                spec: NodeSpec::Takeover {
+                    control: NodeId::new("missing"),
+                    pickup_epsilon: 0.01,
+                },
+                input: None,
+            }],
+        };
+        assert_eq!(
+            compile(&unknown),
+            Err(CompileError::UnknownControl {
+                node: NodeId::new("pickup"),
+                control: NodeId::new("missing"),
+            })
+        );
+
+        let invalid = Graph {
+            nodes: vec![
+                lfo("control"),
+                GraphNode {
+                    id: NodeId::new("pickup"),
+                    spec: NodeSpec::Takeover {
+                        control: NodeId::new("control"),
+                        pickup_epsilon: 1.1,
+                    },
+                    input: None,
+                },
+            ],
+        };
+        assert!(matches!(
+            compile(&invalid),
+            Err(CompileError::InvalidPickupEpsilon { .. })
+        ));
+    }
+
+    #[test]
+    fn takeover_control_edges_participate_in_cycle_detection() {
+        let graph = Graph {
+            nodes: vec![
+                GraphNode {
+                    id: NodeId::new("pickup"),
+                    spec: NodeSpec::Takeover {
+                        control: NodeId::new("scaled"),
+                        pickup_epsilon: 0.01,
+                    },
+                    input: None,
+                },
+                scale("scaled", "pickup"),
+            ],
+        };
+        assert!(matches!(compile(&graph), Err(CompileError::Cycle(_))));
     }
 }

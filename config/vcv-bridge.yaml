@@ -1,0 +1,58 @@
+# Eight bidirectional normalized control lanes for the Control Room Bridge 8
+# Rack plugin. Run with --dry-run if no physical MIDI output is attached.
+device:
+  id: peak
+  pack: novation-peak
+  port: Peak
+  channel: 1
+server:
+  listen: 127.0.0.1:7777
+ai:
+  # Providers: openai, claude, grok, or generic acp.
+  # Every provider still requires an explicit Draft button press.
+  enabled: true
+  provider: openai
+  model: gpt-5.4-mini
+  rack_agent: 127.0.0.1:9102
+  # claude:
+  #   command: claude
+  #   model: sonnet
+  # grok:
+  #   command: grok
+  #   model: grok-4.6
+  # acp:
+  #   command: gemini
+  #   args: [--acp] # Requires a current Gemini CLI; installed 0.25.1 is too old
+  # timeout_seconds: 120
+osc:
+  enabled: true
+  listen: 127.0.0.1:9100
+  queue_capacity: 512
+  output_interval_ms: 10
+  bindings:
+    - { id: vcv.in.1, direction: input, address: /controlroom/in/1, argument: 0, min: 0.0, max: 1.0 }
+    - { id: vcv.in.2, direction: input, address: /controlroom/in/2, argument: 0, min: 0.0, max: 1.0 }
+    - { id: vcv.in.3, direction: input, address: /controlroom/in/3, argument: 0, min: 0.0, max: 1.0 }
+    - { id: vcv.in.4, direction: input, address: /controlroom/in/4, argument: 0, min: 0.0, max: 1.0 }
+    - { id: vcv.in.5, direction: input, address: /controlroom/in/5, argument: 0, min: 0.0, max: 1.0 }
+    - { id: vcv.in.6, direction: input, address: /controlroom/in/6, argument: 0, min: 0.0, max: 1.0 }
+    - { id: vcv.in.7, direction: input, address: /controlroom/in/7, argument: 0, min: 0.0, max: 1.0 }
+    - { id: vcv.in.8, direction: input, address: /controlroom/in/8, argument: 0, min: 0.0, max: 1.0 }
+    - { id: vcv.out.1, direction: output, address: /controlroom/out/1, argument: 0, min: 0.0, max: 1.0, peer: 127.0.0.1:9101 }
+    - { id: vcv.out.2, direction: output, address: /controlroom/out/2, argument: 0, min: 0.0, max: 1.0, peer: 127.0.0.1:9101 }
+    - { id: vcv.out.3, direction: output, address: /controlroom/out/3, argument: 0, min: 0.0, max: 1.0, peer: 127.0.0.1:9101 }
+    - { id: vcv.out.4, direction: output, address: /controlroom/out/4, argument: 0, min: 0.0, max: 1.0, peer: 127.0.0.1:9101 }
+    - { id: vcv.out.5, direction: output, address: /controlroom/out/5, argument: 0, min: 0.0, max: 1.0, peer: 127.0.0.1:9101 }
+    - { id: vcv.out.6, direction: output, address: /controlroom/out/6, argument: 0, min: 0.0, max: 1.0, peer: 127.0.0.1:9101 }
+    - { id: vcv.out.7, direction: output, address: /controlroom/out/7, argument: 0, min: 0.0, max: 1.0, peer: 127.0.0.1:9101 }
+    - { id: vcv.out.8, direction: output, address: /controlroom/out/8, argument: 0, min: 0.0, max: 1.0, peer: 127.0.0.1:9101 }
+nodes:
+  - id: rack-lane-1
+    spec: !ExternalSource { binding: vcv.in.1, default: 0.0 }
+    input: null
+  - id: rack-slew
+    spec: !Slew { rise_per_second: 2.0, fall_per_second: 2.0 }
+    input: rack-lane-1
+  - id: rack-return-1
+    spec: !ExternalSink { binding: vcv.out.1 }
+    input: rack-slew

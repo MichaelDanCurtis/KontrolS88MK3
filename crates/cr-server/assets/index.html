@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Control Room</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23101311'/%3E%3Cpath d='M14 38c8-22 14 12 22-10s12 2 14-8' fill='none' stroke='%239df4b3' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div class="ambient-glow" aria-hidden="true"></div>
+  <header class="topbar">
+    <div class="brand-lockup">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 44 44"><path d="M7 25c5-15 9 8 15-6s8 3 15-8"/><circle cx="7" cy="25" r="2.5"/><circle cx="37" cy="11" r="2.5"/></svg>
+      </div>
+      <div>
+        <p class="eyebrow">CONTROL ROOM <span>/ LIVE PATCH</span></p>
+        <h1>Signal Architecture</h1>
+      </div>
+    </div>
+    <div class="session-title">
+      <span class="session-label">CURRENT SESSION</span>
+      <strong>VCV Bridge Workspace</strong>
+    </div>
+    <div class="status-cluster">
+      <span id="connection" class="pill offline"><i></i> offline</span>
+      <span id="revision" class="pill">REV —</span>
+      <button id="apply" class="apply-button" disabled><span>Commit patch</span><kbd>⌘↵</kbd></button>
+    </div>
+  </header>
+  <main class="app-shell">
+    <aside class="library-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">01 / SOURCES</p>
+          <h2>Module library</h2>
+        </div>
+        <span id="module-count" class="count-badge">—</span>
+      </div>
+      <div class="library-guide">
+        <span class="guide-jack"></span>
+        <p>Choose a module for the field. Patch from <strong>OUT</strong> to any compatible input.</p>
+      </div>
+      <div class="library-filters">
+        <label class="search-field">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>
+          <input id="module-search" type="search" placeholder="Search…" autocomplete="off">
+        </label>
+        <select id="module-category" aria-label="Module category"><option>All</option></select>
+      </div>
+      <div id="module-palette"><p class="muted">Loading catalog…</p></div>
+      <div class="runtime-card">
+        <div class="runtime-title"><span>ENGINE TELEMETRY</span><i></i></div>
+        <dl id="runtime-stats"></dl>
+      </div>
+      <div id="notice" role="status"></div>
+    </aside>
+    <section id="workspace-wrap">
+      <div id="toolbar">
+        <div class="canvas-title">
+          <span class="canvas-icon" aria-hidden="true">⌁</span>
+          <div><strong>PATCH FIELD</strong><span id="dirty">Patch is synchronized</span></div>
+        </div>
+        <div class="canvas-tools">
+          <span class="zoom-label">100%</span>
+          <button id="reload">Discard changes</button>
+        </div>
+      </div>
+      <div id="workspace">
+        <svg id="wires" aria-hidden="true"></svg>
+        <div class="canvas-coordinate top">CONTROL VOLTAGE / SEMANTIC ROUTING</div>
+        <div class="canvas-coordinate bottom">1 KHZ CONTROL PLANE</div>
+        <div id="empty">
+          <div class="empty-signal" aria-hidden="true"><i></i><i></i><i></i></div>
+          <strong>Your signal field is empty</strong>
+          <span>Choose a module from the library to start building.</span>
+        </div>
+      </div>
+    </section>
+    <aside id="copilot-panel">
+      <div class="copilot-title-row">
+        <div class="copilot-lockup">
+          <div class="copilot-glyph" aria-hidden="true">✦</div>
+          <div>
+            <p class="eyebrow">02 / INTELLIGENCE</p>
+            <h2>Rack Copilot</h2>
+          </div>
+        </div>
+        <span id="rack-status" class="rack-orb" title="VCV Rack bridge status"><i></i></span>
+      </div>
+      <p class="copilot-intro">Describe the behavior you want. Copilot reads the live Rack inventory and stages a reversible patch for review.</p>
+      <div id="rack-inventory" class="inventory-chip">VCV Rack not scanned</div>
+      <div class="copilot-composer">
+        <label class="copilot-provider"><span>PLANNING ENGINE</span>
+          <select id="copilot-provider">
+            <option value="">Configured default</option>
+            <option value="openai">OpenAI</option>
+            <option value="claude">Claude</option>
+            <option value="grok">Grok</option>
+            <option value="acp">ACP agent</option>
+          </select>
+        </label>
+        <label class="copilot-prompt"><span>PATCH INTENT</span>
+          <textarea id="copilot-prompt" rows="5" maxlength="4000" placeholder="Build a slowly evolving stereo drone with hands-on macro control…"></textarea>
+        </label>
+        <div class="prompt-examples">
+          <button data-prompt="Add a clocked generative melody with a quantizer and a slow modulation lane.">Generative</button>
+          <button data-prompt="Build a playable subtractive synth voice from my installed modules.">Synth voice</button>
+          <button data-prompt="Explain this patch, then add tasteful movement without replacing anything.">Add motion</button>
+        </div>
+        <button id="copilot-ask" class="copilot-primary"><span>Draft patch architecture</span><b>✦</b></button>
+      </div>
+      <div id="copilot-notice" role="status"></div>
+      <section id="copilot-proposal" hidden>
+        <div class="proposal-header"><span>STAGED PROPOSAL</span><span id="copilot-model"></span></div>
+        <h3 id="copilot-summary"></h3>
+        <div id="copilot-warnings"></div>
+        <ol id="copilot-commands"></ol>
+        <div id="copilot-suggestions"></div>
+        <div class="copilot-actions">
+          <button id="copilot-reject">Reject</button>
+          <button id="copilot-apply" class="copilot-primary">Apply in Rack</button>
+        </div>
+      </section>
+      <button id="copilot-undo" class="undo-button" disabled>Undo last Copilot patch</button>
+      <div class="safety-note"><span>◇</span><p>Nothing changes until you approve it. Rack’s native history remains authoritative.</p></div>
+    </aside>
+  </main>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

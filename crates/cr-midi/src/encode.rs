@@ -3,6 +3,19 @@
 
 use cr_packs::Encoding;
 
+/// Number of complete three-byte MIDI messages emitted by [`encode`].
+///
+/// This is intentionally separate from the byte count: aggregate bus budgets
+/// are expressed in MIDI messages, while a single semantic parameter update
+/// can require one (CC7), two (CC14), or four (NRPN) messages.
+pub const fn message_count(enc: &Encoding) -> u8 {
+    match enc {
+        Encoding::Cc7 { .. } => 1,
+        Encoding::Cc14 { .. } => 2,
+        Encoding::Nrpn { .. } => 4,
+    }
+}
+
 /// Bit depth a given encoding transmits.
 pub fn resolution_bits(enc: &Encoding) -> u8 {
     match enc {
@@ -73,6 +86,13 @@ mod tests {
         out.clear();
         encode(&Encoding::Cc7 { cc: 29 }, 15, 127, &mut out);
         assert_eq!(out, vec![0xBF, 29, 127]);
+    }
+
+    #[test]
+    fn message_count_matches_each_encoding() {
+        assert_eq!(message_count(&Encoding::Cc7 { cc: 29 }), 1);
+        assert_eq!(message_count(&Encoding::Cc14 { msb_cc: 1 }), 2);
+        assert_eq!(message_count(&Encoding::Nrpn { msb: 2, lsb: 5 }), 4);
     }
 
     #[test]

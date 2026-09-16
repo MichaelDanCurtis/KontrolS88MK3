@@ -9,9 +9,14 @@ cr-core = { path = "../cr-core" }
 cr-engine = { path = "../cr-engine" }
 cr-midi = { path = "../cr-midi" }
 cr-packs = { path = "../cr-packs" }
+cr-server = { path = "../cr-server" }
+cr-osc = { path = "../cr-osc" }
+cr-s88 = { path = "../cr-s88" }
 anyhow.workspace = true
 serde.workspace = true
 serde_norway.workspace = true
+crossbeam-channel.workspace = true
+ctrlc = { version = "3.4", features = ["termination"] }
 
 [lib]
 name = "controlroom"

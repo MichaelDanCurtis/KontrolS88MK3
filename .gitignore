@@ -1,4 +1,6 @@
 target/
+.build/
+.swiftpm/
 node_modules/
 dist/
 .DS_Store

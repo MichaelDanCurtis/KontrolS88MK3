@@ -18,6 +18,13 @@ pub enum PackError {
     Cc14LsbOverflow { name: String, msb_cc: u8, lsb: u16 },
     #[error("pack has no parameters")]
     NoParameters,
+    #[error("duplicate device pack name {0:?}")]
+    DuplicatePack(String),
+    #[error("unknown device pack {name:?}; available: {available:?}")]
+    UnknownPack {
+        name: String,
+        available: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,6 +101,60 @@ impl DevicePack {
             }
         }
         Ok(())
+    }
+}
+
+/// Validated device packs keyed by their stable pack name.
+///
+/// Runtime device IDs (for example, `peak-left`) are deliberately separate
+/// from pack names (for example, `novation-peak`), so multiple physical
+/// instruments can share the same semantic model.
+#[derive(Debug, Clone, Default)]
+pub struct PackRegistry {
+    packs: HashMap<String, DevicePack>,
+}
+
+impl PackRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_packs(packs: impl IntoIterator<Item = DevicePack>) -> Result<Self, PackError> {
+        let mut registry = Self::new();
+        for pack in packs {
+            registry.insert(pack)?;
+        }
+        Ok(registry)
+    }
+
+    pub fn insert(&mut self, pack: DevicePack) -> Result<(), PackError> {
+        let name = pack.name.clone();
+        if self.packs.contains_key(&name) {
+            return Err(PackError::DuplicatePack(name));
+        }
+        self.packs.insert(name, pack);
+        Ok(())
+    }
+
+    pub fn get(&self, name: &str) -> Result<&DevicePack, PackError> {
+        self.packs.get(name).ok_or_else(|| PackError::UnknownPack {
+            name: name.to_owned(),
+            available: self.names().map(str::to_owned).collect(),
+        })
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        let mut names: Vec<&str> = self.packs.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names.into_iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.packs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packs.is_empty()
     }
 }
 
@@ -185,6 +246,36 @@ parameters:
         assert!(matches!(
             DevicePack::from_yaml(src),
             Err(PackError::NoParameters)
+        ));
+    }
+
+    #[test]
+    fn registry_resolves_packs_by_stable_name() {
+        let peak = DevicePack::from_yaml(NOVATION_PEAK_YAML).unwrap();
+        let registry = PackRegistry::with_packs([peak]).unwrap();
+        assert_eq!(
+            registry.get("novation-peak").unwrap().display_name,
+            "Novation Peak"
+        );
+        assert_eq!(registry.names().collect::<Vec<_>>(), vec!["novation-peak"]);
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_names() {
+        let peak = DevicePack::from_yaml(NOVATION_PEAK_YAML).unwrap();
+        let err = PackRegistry::with_packs([peak.clone(), peak]).unwrap_err();
+        assert!(matches!(err, PackError::DuplicatePack(name) if name == "novation-peak"));
+    }
+
+    #[test]
+    fn unknown_pack_error_lists_available_names() {
+        let peak = DevicePack::from_yaml(NOVATION_PEAK_YAML).unwrap();
+        let registry = PackRegistry::with_packs([peak]).unwrap();
+        let err = registry.get("moog").unwrap_err();
+        assert!(matches!(
+            err,
+            PackError::UnknownPack { name, available }
+                if name == "moog" && available == vec!["novation-peak"]
         ));
     }
 }

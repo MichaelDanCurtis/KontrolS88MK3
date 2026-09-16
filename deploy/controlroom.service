@@ -1,0 +1,33 @@
+[Unit]
+Description=Control Room MIDI and modulation appliance
+Documentation=http://localhost:7777/
+Wants=network-online.target avahi-daemon.service
+After=network-online.target sound.target avahi-daemon.service
+
+[Service]
+Type=simple
+User=controlroom
+Group=controlroom
+SupplementaryGroups=audio
+WorkingDirectory=/var/lib/controlroom
+ExecStart=/usr/bin/controlroom --listen 0.0.0.0:7777 --state-file /var/lib/controlroom/active.state.yaml /etc/controlroom/controlroom.yaml
+ExecStartPost=/usr/lib/controlroom/controlroom-healthcheck http://127.0.0.1:7777/api/v1/health
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=30s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/controlroom
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

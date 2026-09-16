@@ -28,6 +28,7 @@ macro_rules! id_newtype {
 id_newtype!(NodeId);
 id_newtype!(DeviceId);
 id_newtype!(ParamName);
+id_newtype!(BindingId);
 
 #[cfg(test)]
 mod tests {

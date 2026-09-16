@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40.64mm" height="128.5mm" viewBox="0 0 40.64 128.5">
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#131a21"/>
+      <stop offset="1" stop-color="#090d12"/>
+    </linearGradient>
+    <linearGradient id="header" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffae40" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#50e5ff" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#43e6ad" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+  <rect width="40.64" height="128.5" rx="2" fill="url(#panel)"/>
+  <rect x="1" y="1" width="38.64" height="126.5" rx="1.5" fill="none" stroke="#314251" stroke-width="0.5"/>
+  <path d="M2 3h10" stroke="#ffae40" stroke-width="0.8"/>
+  <path d="M28.64 3h10" stroke="#43e6ad" stroke-width="0.8"/>
+  <rect x="2" y="4.2" width="36.64" height="10" rx="1" fill="url(#header)" stroke="#24333f" stroke-width="0.25"/>
+  <path d="M20.32 15v99" stroke="#25343f" stroke-width="0.25" stroke-dasharray="1 1.4"/>
+  <g fill="none" stroke="#25343f" stroke-width="0.25">
+    <path d="M3 30h34"/><path d="M3 42h34"/><path d="M3 54h34"/><path d="M3 66h34"/>
+    <path d="M3 78h34"/><path d="M3 90h34"/><path d="M3 102h34"/><path d="M3 114h34"/>
+  </g>
+  <g fill="none" stroke-width="0.45">
+    <path d="M4 19h12" stroke="#ffae40"/><path d="M24 19h12" stroke="#43e6ad"/>
+  </g>
+  <rect x="3" y="116.2" width="34.64" height="9.3" rx="1" fill="#0b1116" stroke="#24333f" stroke-width="0.25"/>
+</svg>

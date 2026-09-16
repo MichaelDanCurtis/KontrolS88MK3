@@ -1,0 +1,21 @@
+schema_version: 1
+device: Native Instruments Kontrol S88 MK3
+firmware: unknown
+protocol: midi
+hardware_capture: false
+source: Synthetic standard-template example; verify against hardware
+events:
+- at_us: 0
+  direction: input
+  bytes:
+  - 176
+  - 20
+  - 0
+  note: Channel 1 CC 20 at minimum
+- at_us: 125000
+  direction: input
+  bytes:
+  - 176
+  - 20
+  - 127
+  note: Channel 1 CC 20 at maximum

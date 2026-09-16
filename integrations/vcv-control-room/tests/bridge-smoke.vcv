@@ -1,0 +1,14 @@
+{
+  "version": "2.6.6",
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "ControlRoomBridge",
+      "model": "Bridge8",
+      "version": "2.1.0",
+      "params": [],
+      "pos": [0, 0]
+    }
+  ],
+  "cables": []
+}

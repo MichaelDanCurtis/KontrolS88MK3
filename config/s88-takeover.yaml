@@ -1,0 +1,48 @@
+# Create a standard MIDI template on the S88 whose eight knobs emit CC 20-27
+# on channel 1. This example uses knob 1 to pick up a modulated Peak cutoff.
+device:
+  id: peak
+  pack: novation-peak
+  port: Peak
+  channel: 1
+s88:
+  enabled: true
+  port: KONTROL S88 MK3
+  channel: 1
+  queue_capacity: 128
+  reconnect_interval_ms: 500
+  knobs:
+    - { id: s88.knob.1, cc: 20 }
+    - { id: s88.knob.2, cc: 21 }
+    - { id: s88.knob.3, cc: 22 }
+    - { id: s88.knob.4, cc: 23 }
+    - { id: s88.knob.5, cc: 24 }
+    - { id: s88.knob.6, cc: 25 }
+    - { id: s88.knob.7, cc: 26 }
+    - { id: s88.knob.8, cc: 27 }
+nodes:
+  - id: modulation
+    spec: !Lfo
+      shape: triangle
+      freq_hz: 0.1
+    input: null
+  - id: knob-1
+    spec: !ExternalSource
+      binding: s88.knob.1
+      default: 0.0
+    input: null
+  - id: pickup
+    spec: !Takeover
+      control: knob-1
+      pickup_epsilon: 0.01
+    input: modulation
+  - id: cutoff-range
+    spec: !Scale
+      min: 0.0
+      max: 127.0
+    input: pickup
+  - id: cutoff
+    spec: !Sink
+      device: peak
+      param: filter.cutoff
+    input: cutoff-range

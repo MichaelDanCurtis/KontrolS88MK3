@@ -1,16 +1,16 @@
 # Control Room — Design
 
 **Date:** 2026-08-10
-**Status:** Approved for planning
+**Status:** Active — implementation status tracked in [`docs/ROADMAP.md`](../../ROADMAP.md)
 **Target hardware:** Native Instruments Kontrol S88 MK3 (firmware 2.x), Novation Peak, Moog
 
 ---
 
 ## 1. Purpose
 
-Control Room is a headless semantic routing engine for electronic music hardware — a "MIDI control room." It lets a musician patch instruments together **by meaning** ("modulate the Peak's VCA with an LFO") rather than by CC and NRPN numbers, using a drag-and-drop graph in a browser.
+Control Room is a headless semantic routing engine for electronic music hardware — a "MIDI control room." It lets a musician patch instruments together **by meaning** ("modulate the Peak's VCA with an LFO") rather than by CC and NRPN numbers, using a drag-and-drop graph in its native macOS or embedded browser surface.
 
-It runs as an appliance: today on a laptop, later on a Raspberry Pi or Mac Mini that sits in the rack as "another instrument," with the browser as its only window.
+It runs as an appliance: today on a laptop, later on a Raspberry Pi or Mac Mini that sits in the rack as "another instrument," with native and browser clients as interchangeable windows.
 
 ### Why this exists
 
@@ -51,7 +51,7 @@ NKS parsing, AI patching, VCV Rack bridge, Ableton integration, plugin hosting, 
 
 1. A software LFO modulates the Novation Peak's VCA level, audibly and smoothly, with no NI software running.
 2. The patch is built by dragging nodes in a browser, not editing config by hand.
-3. The S88 screen shows the patch as a live module; grabbing a knob takes over the modulated parameter without a value jump.
+3. The S88 standard-template knobs take over modulated parameters without a value jump. Screen rendering remains a hardware-capture gate.
 4. The same binary runs headless on a Raspberry Pi, reachable at `controlroom.local`.
 
 ---
@@ -66,7 +66,7 @@ This works with all existing gear and needs no CV hardware. Real CV and VCV Rack
 
 ### 3.2 One command API for every client
 
-**The browser UI, the S88 surface, and the future AI layer all speak the same graph-command API.** The AI gets no privileged path: "wire the Novation to the Moog" compiles into exactly the commands a mouse would issue.
+**The native UI, browser UI, S88 surface model, and future AI layer all speak the same graph-command API.** The AI gets no privileged path: "wire the Novation to the Moog" compiles into exactly the commands a mouse would issue.
 
 This is the decision that keeps the system modular. It means the AI layer is small when built, and that any future surface is a client rather than a special case.
 
@@ -74,7 +74,7 @@ This is the decision that keeps the system modular. It means the AI layer is sma
 
 Device packs are editable YAML mapping semantic parameter names to wire encodings. Hand-authored for the first devices; NKS metadata later *generates* packs rather than replacing the format. This avoids blocking v1 on the hardest reverse-engineering problem, and keeps devices community-extensible.
 
-### 3.4 Headless service, browser as client
+### 3.4 Headless service, native and browser clients
 
 A single Rust binary exposing HTTP + WebSocket. Rust for sub-millisecond timing on constrained hardware, single-binary deployment, and aarch64 cross-compilation. The browser UI is bundled into the binary as static assets — an appliance on a closed studio network cannot fetch from a CDN.
 
@@ -88,7 +88,7 @@ Five layers, each replaceable:
 2. **Device packs (the meaning)** — named parameters with ranges, units, and wire encodings.
 3. **Graph engine (the brain)** — sources, transforms, sinks on a fixed control-rate tick.
 4. **Control plane** — HTTP/WebSocket; commands in, state and meters out.
-5. **Surfaces** — browser and S88, both clients of the same API.
+5. **Surfaces** — native macOS, browser, and S88 models, all using the same revisioned command/state seam.
 
 ### 4.1 Crates
 
@@ -98,10 +98,9 @@ cr-engine    tick loop, node implementations — pure, depends only on cr-core
 cr-packs     device pack schema, loader, validation
 cr-midi      midir adapter; MIDI encode/decode incl. 14-bit CC, NRPN; rate limiting
 cr-osc       rosc adapter; address-pattern ↔ signal binding
-cr-s88       Kontrol MK3 driver: MIDI templates, DAW-port SysEx, LED control
+cr-s88       Kontrol MK3 standard-template input, capture/replay, surface model, display safety boundary
 cr-server    axum HTTP/WS server; serves embedded UI assets
-cr-ui        cargo crate embedding the built frontend bundle (rust-embed)
-ui/          npm workspace: browser node editor (React Flow); built into cr-ui
+native/      SwiftUI macOS signal workstation using the HTTP/WS control plane
 controlroom  binary: config, CLI, wiring
 ```
 
@@ -117,7 +116,7 @@ Strict dependency DAG; every crate independently testable.
 
 - **Control tick: 1 kHz**, dedicated thread. No allocation in the tick; node state is pre-allocated when a patch is applied.
 - **Commands** arrive via channel and **apply at tick boundaries**, so the engine never observes a half-built graph.
-- **State out** is coalesced to ~30 Hz for meters and screen — the UI does not need 1 kHz.
+- **State out** is coalesced to ~30 Hz for UI meters — a surface does not need 1 kHz.
 
 ---
 
@@ -125,12 +124,12 @@ Strict dependency DAG; every crate independently testable.
 
 Target: `LFO(0.3 Hz, triangle) → Scale(0..1 → 20..90) → Sink(peak.vca.level)`
 
-1. Browser drags an LFO node; sends `AddNode`.
-2. Command is validated against the pack registry, queued, applied at the next tick boundary.
+1. A native or browser client stages an LFO node and sends a revisioned command batch on Apply.
+2. The batch is validated and compiled atomically, then applied by the runtime owner at a tick boundary.
 3. Each tick: LFO computes phase → Scale maps the range → sink asks the Peak pack for the encoding (CC 24, ch 1, 7-bit) and quantizes.
 4. Sink emits **only if the quantized value changed** and the rate budget allows; pushes to an output ring buffer.
 5. `cr-midi` drains the ring and writes to the port.
-6. State publisher coalesces values at 30 Hz → WebSocket → browser meters, and → `cr-s88` → screen module `LFO→VCA 47`.
+6. State publisher coalesces values at 30 Hz → WebSocket → native/browser meters. A future verified display adapter can consume the same semantic state.
 7. User grabs S88 knob 3 → knob delta → Takeover node hands control to the knob.
 
 **Takeover uses pickup mode in v1:** the modulated parameter keeps following the LFO until the physical knob's position crosses the current modulated value, at which point the knob takes over. This guarantees no value jump. Other takeover modes (crossfade, scaled-relative) are deferred — a node parameter, not a redesign.
@@ -151,9 +150,9 @@ Everything else degrades rather than fails:
 
 | Condition | Behavior |
 |---|---|
-| Device disconnected | Sinks hold last value, node marked `orphaned`, UI shows amber |
-| Device replugged | Auto-rebind via stable port identity (name + USB location), resume |
-| Malformed device pack | Load-time validation failure with line number; rest of graph runs |
+| MIDI output disconnected | Engine continues; exact resolved port retries every 500 ms; errors, drops, and reconnects are reported |
+| S88 input replugged | Auto-discovery reconnects an unambiguous matching input port |
+| Malformed device pack | Startup rejects the configuration before the engine runs |
 | MIDI bus saturation | Bounded rate limiter, last-write-wins, drop rate surfaced in UI |
 | Invalid patch edit | Rejected at command validation with a reason; graph unchanged |
 
@@ -167,7 +166,7 @@ Everything else degrades rather than fails:
 - `cr-packs` — schema validation; every shipped pack round-trips
 - `cr-midi` — byte-exact encode tests including 14-bit CC and NRPN edge cases; decode against recorded streams
 - `cr-s88` — byte-exact replay against captured device traffic
-- Integration — start the server, drive commands over WebSocket, assert bytes on a virtual MIDI port
+- Integration — apply compiled replacements through the runtime boundary and assert bytes on capture sinks
 
 ### 7.1 Verification honesty requirement
 
@@ -183,27 +182,37 @@ Anything in `cr-s88` derived from these sources is marked `verify against hardwa
 
 ### 7.2 Display capability ceiling
 
-v1 drives the S88 display through MIDI Templates and DAW-port SysEx, which affords a **structured parameter UI** — not two lines of text. The reference implementation (DrivenByMoss) already renders track name and number, device name, parameter bank name, and per-parameter names with live values, and extends firmware 2.0's native plugin edit mode with its own pages.
+The current v1 implementation does not transmit proprietary DAW-port SysEx or framebuffer bytes.
+It models structured banks, modules, parameter labels, and values so a verified future transport can
+render them without changing the graph or takeover logic. The transport stays disabled until physical
+captures establish a safe activation handshake and byte format.
 
-This suits Control Room well: a module reading `LFO→VCA 47` with a grabbable knob is parameter-shaped data, and forcing it through a framebuffer would be fighting the hardware.
-
-**What the ceiling actually costs us** is anything picture-shaped: waveform views, a visibly cycling LFO shape, a mini node graph on the keyboard. Those require the framebuffer (§9.1).
+This preserves a useful semantic target—a module reading `LFO→VCA 47` with a grabbable knob—while
+keeping picture-shaped features such as waveforms and a mini node graph in the framebuffer research
+lane (§9.1).
 
 ---
 
 ## 8. Milestones
 
-| # | Deliverable | Proves |
-|---|---|---|
-| M1 | Engine + MIDI + Peak pack; LFO→VCA from a config file, headless | Continuous modulation into real hardware feels good |
-| M2 | Server + browser node editor | The patch is buildable by dragging |
-| M3 | OSC adapter | Signals cross the network boundary |
-| M4 | S88 screen modules + knob takeover | The keyboard is a surface onto the engine |
-| M5 | Pi cross-compile, systemd, mDNS | It is an appliance, not a laptop app |
+The canonical live status, completion gates, and implementation order are in
+[`docs/ROADMAP.md`](../../ROADMAP.md). This table retains the design-level
+milestones.
+
+| # | Status | Deliverable | Proves |
+|---|---|---|---|
+| M1 | Software complete; hardware gate pending | Engine + MIDI + Peak pack; LFO→VCA from a config file, headless | Continuous modulation into real hardware feels good |
+| M2 | Software complete | Server + browser node editor | The patch is buildable by dragging; running-hardware UX gate remains |
+| M2N | Software complete | Native macOS signal workstation | The primary desktop surface feels like a studio instrument |
+| M3 | Software complete | OSC adapter | Signals cross the network boundary; studio-client gate remains |
+| M4 | Foundation complete; hardware-gated | S88 standard-template input, surface model + knob takeover | Display activation awaits verified hardware captures |
+| M5 | Packaging complete; target-gated | aarch64 CI path, systemd, mDNS | Unattended Raspberry Pi boot/reconnect gate remains |
 
 **M1 is the honest proof.** If continuous modulation into real hardware does not feel good there, the rest is not worth building yet.
 
-**Planning scope:** this document specifies the whole system, but implementation planning starts with **M1 only**. Later milestones get their own plans once M1's hardware reality is known.
+Development may proceed through later milestones without pretending the M1
+hardware gate passed. Hardware-dependent claims remain explicitly unverified
+until exercised on the named device.
 
 ---
 

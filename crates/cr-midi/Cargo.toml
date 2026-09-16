@@ -8,3 +8,8 @@ rust-version.workspace = true
 cr-packs = { path = "../cr-packs" }
 midir.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
+
+[[bin]]
+name = "cr-midi-monitor"
+path = "src/bin/monitor.rs"
