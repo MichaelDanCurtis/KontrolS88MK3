@@ -83,6 +83,86 @@ bank behavior, reconnect behavior, or any display protocol.
 four-byte little-endian length header matches the remaining payload, and the common payload prefix
 after that header. It never interprets a candidate command and cannot transmit captured bytes.
 
+## Capturing USB on macOS
+
+The display/DAW-port protocol lives on the USB bulk endpoints, not MIDI, so it has to be captured
+with Wireshark/tshark against the USB host controller interface (the `XHC`/`XHCn` pseudo-interface
+that macOS exposes for `usbmon`-style captures), not a network interface. This requires elevated
+privileges: either run `tshark`/`Wireshark` with `sudo`, or grant the `ChmodBPF` helper (installed
+with Wireshark) access so your user can read `/dev/bpf*`.
+
+**`tshark` is not currently installed on this development machine.** The `import-usb` field mapping
+below (see "Field mapping is unverified") was written from general knowledge of Wireshark's USB
+dissector, not from a real export, and must be checked against an actual capture before it is
+trusted.
+
+General shape of a capture session:
+
+```sh
+# List candidate interfaces; look for the XHC/XHCn entry matching the bus the S88 is on.
+tshark -D
+
+# Capture bulk traffic on that interface while driving the NI client, then export as JSON.
+sudo tshark -i XHC20 -w s88-display-experiment.pcapng
+tshark -r s88-display-experiment.pcapng -T json > s88-display-experiment.json
+```
+
+Keep the same one-visible-value-at-a-time discipline as MIDI captures: baseline first, one change,
+stop, export, and note the exact UI action next to the JSON export before importing it.
+
+## The `import-usb` command
+
+`cr-s88-capture import-usb` turns a `tshark -T json` export into a `usb_bulk` `CaptureFixture`. It
+deliberately consumes tshark's JSON rather than parsing pcapng or the `DLT_USB_DARWIN` binary layout
+itself — tshark does the dissection, so this tool is not guessing at binary structures nobody here
+can test against hardware.
+
+```sh
+cargo run -p cr-s88 --bin cr-s88-capture -- import-usb s88-display-experiment.json \
+  --output crates/cr-s88/fixtures/display-experiment.usb.yaml \
+  --device "Native Instruments Kontrol S88 MK3" \
+  --firmware 2.x.y \
+  --source "tshark capture on XHC20, label-length experiment" \
+  --hardware-capture
+```
+
+Flags:
+
+- `INPUT.json` (positional, required) — a `tshark -T json` export.
+- `--output FILE` (required) — where to write the resulting YAML fixture.
+- `--device NAME` (required) — recorded verbatim in the fixture; never inferred from the capture.
+- `--firmware VERSION` (optional) — recorded verbatim if supplied.
+- `--source TEXT` (optional) — defaults to a string naming the input file if omitted.
+- `--hardware-capture` (optional, off by default) — sets `hardware_capture: true`. This is never
+  inferred from the file; you assert it because you know the bytes came from the physical S88.
+  Without it, the fixture keeps `hardware_capture: false` and `import-usb` does not rewrite
+  `--source` to hide that — per the rule above, a non-hardware fixture's source should still say
+  "verify against hardware" if it is meant to stand in for a pending capture.
+- `--all-transfer-types` (optional, off by default) — by default only USB bulk transfers are kept;
+  control, interrupt, and isochronous transfers are dropped. Pass this to keep everything.
+
+Direction is mapped so that host→device (OUT) transfers become `output` events and device→host (IN)
+transfers become `input` events. For framebuffer research the host→device transfers are the
+interesting ones, so double-check this mapping against `summarize`/`analyze-usb` output on the first
+real capture — an inverted mapping would send someone analysing the wrong half of the trace.
+
+### Field mapping is unverified
+
+No S88 is connected to this machine, so the tshark JSON field names `import-usb` looks for
+(`frame.time_relative` for timestamps; `usb.endpoint_address.direction` and `usb.src`/`usb.dst` for
+direction; `usb.capdata`, `usb.payload`, and `usb.data_fragment` for payload bytes) have not been
+checked against a real export. The importer searches the whole JSON tree for each candidate name in
+priority order rather than assuming one fixed nesting, and if none of the candidates for a value are
+present it fails immediately with an error listing every name it tried and every field name it found
+in the first packet, instead of silently emitting an empty or wrong fixture.
+
+Treat the first real capture as a calibration run, not evidence: import it, then read the
+`summarize` and `analyze-usb` output by eye — event counts, direction split, transfer-length
+histogram, byte values — before drawing any conclusion from it. If the shape is wrong, `import-usb`
+should have already refused to run rather than produced a plausible-looking but incorrect fixture;
+if it did produce output, sanity-check that the reported direction split and byte values match what
+you expect from the experiment you ran.
+
 ## Current evidence
 
 | Area | Status | Evidence needed |

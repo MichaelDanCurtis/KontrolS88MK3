@@ -1,5 +1,7 @@
 use cr_s88::{CaptureDirection, CaptureEvent, CaptureFixture, CaptureProtocol, list_input_ports};
 use midir::{Ignore, MidiInput};
+use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,9 +16,10 @@ fn main() -> anyhow::Result<()> {
         Some("verify-template") if args.len() >= 3 => verify_template(&args[2], &args[3..]),
         Some("list") if args.len() == 2 => list(),
         Some("record") => record(&args[2..]),
+        Some("import-usb") if args.len() >= 3 => import_usb(&args[2..]),
         _ => {
             eprintln!(
-                "usage:\n  cr-s88-capture list\n  cr-s88-capture validate FILE\n  cr-s88-capture summarize FILE\n  cr-s88-capture analyze-usb FILE\n  cr-s88-capture diff LEFT RIGHT\n  cr-s88-capture verify-template FILE [--channel N] [--cc-start N]\n  cr-s88-capture record --port MATCH --output FILE [--seconds N] [--firmware VERSION]"
+                "usage:\n  cr-s88-capture list\n  cr-s88-capture validate FILE\n  cr-s88-capture summarize FILE\n  cr-s88-capture analyze-usb FILE\n  cr-s88-capture diff LEFT RIGHT\n  cr-s88-capture verify-template FILE [--channel N] [--cc-start N]\n  cr-s88-capture record --port MATCH --output FILE [--seconds N] [--firmware VERSION]\n  cr-s88-capture import-usb INPUT.json --output FILE --device NAME [--firmware VERSION] [--source TEXT] [--hardware-capture] [--all-transfer-types]"
             );
             std::process::exit(2);
         }
@@ -291,6 +294,399 @@ impl RecordOptions {
     }
 }
 
+/// Field names tried, in priority order, when hunting for each mapped value in
+/// a tshark `-T json` USB capture export. None of these are confirmed against
+/// a real capture (see `docs/s88-protocol-notebook.md`); they are educated
+/// guesses that are validated against the input's actual shape at import
+/// time, with an actionable error if none match.
+const TIME_FIELD_CANDIDATES: &[&str] = &[
+    "frame.time_relative",
+    "frame.time_epoch",
+    "frame.time_delta_displayed",
+    "frame.time_delta",
+];
+
+const DIRECTION_BIT_CANDIDATES: &[&str] = &[
+    "usb.endpoint_address.direction",
+    "usb.endpoint_address_direction",
+];
+
+const DIRECTION_ENDPOINT_CANDIDATES: &[&str] = &["usb.dst", "usb.src"];
+
+const PAYLOAD_FIELD_CANDIDATES: &[&str] = &["usb.capdata", "usb.payload", "usb.data_fragment"];
+
+const TRANSFER_TYPE_FIELD_CANDIDATES: &[&str] = &["usb.transfer_type"];
+
+fn import_usb(args: &[String]) -> anyhow::Result<()> {
+    let options = ImportUsbOptions::parse(args)?;
+    let fixture = build_usb_fixture(&options)?;
+    fixture.save(Path::new(&options.output))?;
+    println!(
+        "saved {} usb_bulk events to {}",
+        fixture.events.len(),
+        options.output
+    );
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ImportUsbOptions {
+    input: String,
+    output: String,
+    device: String,
+    firmware: Option<String>,
+    source: String,
+    hardware_capture: bool,
+    all_transfer_types: bool,
+}
+
+impl ImportUsbOptions {
+    fn parse(args: &[String]) -> anyhow::Result<Self> {
+        let input = args
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("import-usb requires an input file"))?
+            .clone();
+        let mut output = None;
+        let mut device = None;
+        let mut firmware = None;
+        let mut source = None;
+        let mut hardware_capture = false;
+        let mut all_transfer_types = false;
+        let mut index = 1;
+        while index < args.len() {
+            let name = &args[index];
+            match name.as_str() {
+                "--hardware-capture" => {
+                    hardware_capture = true;
+                    index += 1;
+                }
+                "--all-transfer-types" => {
+                    all_transfer_types = true;
+                    index += 1;
+                }
+                "--output" | "--device" | "--firmware" | "--source" => {
+                    let value = args
+                        .get(index + 1)
+                        .ok_or_else(|| anyhow::anyhow!("{name} requires a value"))?;
+                    match name.as_str() {
+                        "--output" if output.is_none() => output = Some(value.clone()),
+                        "--device" if device.is_none() => device = Some(value.clone()),
+                        "--firmware" if firmware.is_none() => firmware = Some(value.clone()),
+                        "--source" if source.is_none() => source = Some(value.clone()),
+                        _ => anyhow::bail!("duplicate import-usb option {name}"),
+                    }
+                    index += 2;
+                }
+                _ => anyhow::bail!("unknown import-usb option {name:?}"),
+            }
+        }
+        let output = output.ok_or_else(|| anyhow::anyhow!("missing required --output"))?;
+        let device = device.ok_or_else(|| anyhow::anyhow!("missing required --device"))?;
+        let source = source.unwrap_or_else(|| format!("tshark USB capture export {input}"));
+        Ok(Self {
+            input,
+            output,
+            device,
+            firmware,
+            source,
+            hardware_capture,
+            all_transfer_types,
+        })
+    }
+}
+
+fn build_usb_fixture(options: &ImportUsbOptions) -> anyhow::Result<CaptureFixture> {
+    let raw = std::fs::read_to_string(&options.input)
+        .map_err(|error| anyhow::anyhow!("reading {}: {error}", options.input))?;
+    let packets: Vec<Value> = serde_json::from_str(&raw).map_err(|error| {
+        anyhow::anyhow!(
+            "parsing {} as a tshark -T json export (expected a JSON array of packet objects): {error}",
+            options.input
+        )
+    })?;
+    build_usb_fixture_from_packets(&packets, options)
+}
+
+fn build_usb_fixture_from_packets(
+    packets: &[Value],
+    options: &ImportUsbOptions,
+) -> anyhow::Result<CaptureFixture> {
+    let first_packet = packets
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("capture export contains no packets"))?;
+    let first_layers = packet_layers(first_packet);
+
+    if !options.all_transfer_types
+        && find_field(first_layers, TRANSFER_TYPE_FIELD_CANDIDATES).is_none()
+    {
+        return Err(field_lookup_error(
+            "transfer type",
+            TRANSFER_TYPE_FIELD_CANDIDATES,
+            first_layers,
+        ));
+    }
+    if find_field(first_layers, TIME_FIELD_CANDIDATES).is_none() {
+        return Err(field_lookup_error(
+            "timestamp",
+            TIME_FIELD_CANDIDATES,
+            first_layers,
+        ));
+    }
+    if find_field(first_layers, DIRECTION_BIT_CANDIDATES).is_none()
+        && find_field(first_layers, DIRECTION_ENDPOINT_CANDIDATES).is_none()
+    {
+        let mut direction_candidates = DIRECTION_BIT_CANDIDATES.to_vec();
+        direction_candidates.extend_from_slice(DIRECTION_ENDPOINT_CANDIDATES);
+        return Err(field_lookup_error(
+            "direction",
+            &direction_candidates,
+            first_layers,
+        ));
+    }
+    if find_field(first_layers, PAYLOAD_FIELD_CANDIDATES).is_none() {
+        return Err(field_lookup_error(
+            "payload",
+            PAYLOAD_FIELD_CANDIDATES,
+            first_layers,
+        ));
+    }
+
+    let mut raw_events: Vec<(f64, CaptureDirection, Vec<u8>)> = Vec::new();
+    for (index, packet) in packets.iter().enumerate() {
+        let layers = packet_layers(packet);
+
+        if !options.all_transfer_types {
+            match transfer_type_is_bulk(layers) {
+                Some(true) => {}
+                Some(false) | None => continue,
+            }
+        }
+
+        let seconds = find_scalar(layers, TIME_FIELD_CANDIDATES)
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .ok_or_else(|| anyhow::anyhow!("packet {index}: could not parse a timestamp"))?;
+
+        let direction = extract_direction(layers).ok_or_else(|| {
+            anyhow::anyhow!("packet {index}: could not determine transfer direction")
+        })?;
+
+        let Some(payload_raw) = find_scalar(layers, PAYLOAD_FIELD_CANDIDATES) else {
+            continue;
+        };
+        let payload_raw = payload_raw.trim();
+        if payload_raw.is_empty() {
+            continue;
+        }
+        let bytes = parse_hex_bytes(payload_raw).map_err(|error| {
+            anyhow::anyhow!(
+                "packet {index}: payload {payload_raw:?} is not colon-separated hex: {error}"
+            )
+        })?;
+        if bytes.is_empty() {
+            continue;
+        }
+
+        raw_events.push((seconds, direction, bytes));
+    }
+
+    anyhow::ensure!(
+        !raw_events.is_empty(),
+        "no usable USB bulk transfers with payload were found in {}",
+        options.input
+    );
+
+    raw_events.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let base = raw_events
+        .first()
+        .map(|(seconds, _, _)| *seconds)
+        .unwrap_or(0.0);
+    let events = raw_events
+        .into_iter()
+        .map(|(seconds, direction, bytes)| CaptureEvent {
+            at_us: ((seconds - base) * 1_000_000.0).max(0.0).round() as u64,
+            direction,
+            bytes,
+            note: None,
+        })
+        .collect();
+
+    Ok(CaptureFixture {
+        schema_version: 1,
+        device: options.device.clone(),
+        firmware: options.firmware.clone(),
+        protocol: CaptureProtocol::UsbBulk,
+        hardware_capture: options.hardware_capture,
+        source: options.source.clone(),
+        events,
+    })
+}
+
+/// tshark's `-T json` export nests dissected fields under `_source.layers`.
+/// Fall back to the packet itself so a differently-shaped export (or a test
+/// fixture) is still searched rather than rejected outright.
+fn packet_layers(packet: &Value) -> &Value {
+    packet
+        .get("_source")
+        .and_then(|source| source.get("layers"))
+        .unwrap_or(packet)
+}
+
+/// Depth-first search for a JSON object key exactly matching `name`, anywhere
+/// under `value`. This deliberately does not assume a fixed nesting depth,
+/// because tshark's JSON shape for USB dissection has not been verified
+/// against a real capture.
+fn find_field<'a>(value: &'a Value, candidates: &[&str]) -> Option<&'a Value> {
+    for &candidate in candidates {
+        if let Some(found) = find_field_named(value, candidate) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_field_named<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
+    match value {
+        Value::Object(map) => {
+            if let Some(found) = map.get(name) {
+                return Some(found);
+            }
+            map.values().find_map(|child| find_field_named(child, name))
+        }
+        Value::Array(items) => items.iter().find_map(|item| find_field_named(item, name)),
+        _ => None,
+    }
+}
+
+fn find_scalar(value: &Value, candidates: &[&str]) -> Option<String> {
+    find_field(value, candidates).and_then(scalar_str)
+}
+
+/// Renders a tshark field value as a plain string. tshark's JSON export
+/// usually gives scalars as strings, but this tolerates numbers, booleans and
+/// single-element arrays too.
+fn scalar_str(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Array(items) => items.first().and_then(scalar_str),
+        _ => None,
+    }
+}
+
+fn collect_field_names(value: &Value, out: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                out.insert(key.clone());
+                collect_field_names(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_field_names(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn field_lookup_error(what: &str, candidates: &[&str], first_layers: &Value) -> anyhow::Error {
+    let mut observed = BTreeSet::new();
+    collect_field_names(first_layers, &mut observed);
+    let observed = if observed.is_empty() {
+        "(none)".to_string()
+    } else {
+        observed.into_iter().collect::<Vec<_>>().join(", ")
+    };
+    anyhow::anyhow!(
+        "could not find a {what} field in the first packet.\n  tried: {}\n  fields present in the first packet: {observed}",
+        candidates.join(", ")
+    )
+}
+
+fn parse_int_maybe_hex(raw: &str) -> Option<i64> {
+    if let Some(stripped) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        i64::from_str_radix(stripped, 16).ok()
+    } else {
+        raw.parse::<i64>().ok()
+    }
+}
+
+fn transfer_type_is_bulk(layers: &Value) -> Option<bool> {
+    let raw = find_scalar(layers, TRANSFER_TYPE_FIELD_CANDIDATES)?;
+    let raw = raw.trim();
+    if let Some(code) = parse_int_maybe_hex(raw) {
+        return Some(code == 3);
+    }
+    let lowered = raw.to_ascii_lowercase();
+    if lowered.contains("bulk") {
+        return Some(true);
+    }
+    if lowered.contains("control") || lowered.contains("interrupt") || lowered.contains("iso") {
+        return Some(false);
+    }
+    None
+}
+
+fn parse_direction_bit(value: &Value) -> Option<CaptureDirection> {
+    let raw = scalar_str(value)?;
+    let raw = raw.trim();
+    if let Some(code) = parse_int_maybe_hex(raw) {
+        return Some(if code != 0 {
+            CaptureDirection::Input
+        } else {
+            CaptureDirection::Output
+        });
+    }
+    match raw.to_ascii_lowercase().as_str() {
+        "in" => Some(CaptureDirection::Input),
+        "out" => Some(CaptureDirection::Output),
+        _ => None,
+    }
+}
+
+/// Maps host<->device direction onto [`CaptureDirection`]: host->device (OUT)
+/// is `Output`, device->host (IN) is `Input`. Tries the endpoint direction bit
+/// first, then falls back to the `usb.src`/`usb.dst` "host" convention.
+fn extract_direction(layers: &Value) -> Option<CaptureDirection> {
+    for &candidate in DIRECTION_BIT_CANDIDATES {
+        if let Some(value) = find_field_named(layers, candidate)
+            && let Some(direction) = parse_direction_bit(value)
+        {
+            return Some(direction);
+        }
+    }
+    for &candidate in DIRECTION_ENDPOINT_CANDIDATES {
+        if let Some(value) = find_field_named(layers, candidate)
+            && let Some(raw) = scalar_str(value)
+        {
+            let is_host = raw.trim().eq_ignore_ascii_case("host");
+            return Some(match (candidate, is_host) {
+                ("usb.dst", true) => CaptureDirection::Input,
+                ("usb.dst", false) => CaptureDirection::Output,
+                (_, true) => CaptureDirection::Output,
+                (_, false) => CaptureDirection::Input,
+            });
+        }
+    }
+    None
+}
+
+fn parse_hex_bytes(raw: &str) -> anyhow::Result<Vec<u8>> {
+    raw.split(':')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            u8::from_str_radix(part, 16)
+                .map_err(|error| anyhow::anyhow!("{part:?} is not a hex byte: {error}"))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +736,210 @@ mod tests {
         assert!(verify_template_fixture(&fixture, 1, 20).is_err());
         fixture.hardware_capture = false;
         assert!(verify_template_fixture(&fixture, 1, 20).is_err());
+    }
+
+    const WELL_FORMED_USB_JSON: &str = r#"[
+      {
+        "_source": {
+          "layers": {
+            "frame": { "frame.time_relative": "0.000000" },
+            "usb": {
+              "usb.transfer_type": "0x03",
+              "usb.endpoint_address_tree": { "usb.endpoint_address.direction": "0" },
+              "usb.capdata": "84:00:00:60"
+            }
+          }
+        }
+      },
+      {
+        "_source": {
+          "layers": {
+            "frame": { "frame.time_relative": "0.001500" },
+            "usb": {
+              "usb.transfer_type": "0x03",
+              "usb.endpoint_address_tree": { "usb.endpoint_address.direction": "1" },
+              "usb.capdata": "01:02:03"
+            }
+          }
+        }
+      }
+    ]"#;
+
+    fn import_options(all_transfer_types: bool, hardware_capture: bool) -> ImportUsbOptions {
+        ImportUsbOptions {
+            input: "capture.json".into(),
+            output: "out.yaml".into(),
+            device: "Kontrol S88 MK3".into(),
+            firmware: None,
+            source: "test capture".into(),
+            hardware_capture,
+            all_transfer_types,
+        }
+    }
+
+    fn packets_from(json: &str) -> Vec<Value> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn import_usb_options_require_output_and_device_and_default_source() {
+        let parsed = ImportUsbOptions::parse(&args(&[
+            "capture.json",
+            "--output",
+            "out.yaml",
+            "--device",
+            "Kontrol S88 MK3",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.output, "out.yaml");
+        assert_eq!(parsed.device, "Kontrol S88 MK3");
+        assert!(!parsed.hardware_capture);
+        assert!(!parsed.all_transfer_types);
+        assert_eq!(parsed.source, "tshark USB capture export capture.json");
+
+        assert!(ImportUsbOptions::parse(&args(&["capture.json", "--output", "out.yaml"])).is_err());
+
+        let with_flags = ImportUsbOptions::parse(&args(&[
+            "capture.json",
+            "--output",
+            "out.yaml",
+            "--device",
+            "S88",
+            "--hardware-capture",
+            "--all-transfer-types",
+        ]))
+        .unwrap();
+        assert!(with_flags.hardware_capture);
+        assert!(with_flags.all_transfer_types);
+    }
+
+    #[test]
+    fn import_usb_maps_time_direction_and_bytes() {
+        let packets = packets_from(WELL_FORMED_USB_JSON);
+        let fixture =
+            build_usb_fixture_from_packets(&packets, &import_options(false, false)).unwrap();
+        assert_eq!(fixture.protocol, CaptureProtocol::UsbBulk);
+        assert_eq!(fixture.events.len(), 2);
+        assert_eq!(fixture.events[0].at_us, 0);
+        assert_eq!(fixture.events[0].bytes, vec![0x84, 0x00, 0x00, 0x60]);
+        assert_eq!(fixture.events[1].at_us, 1500);
+        assert_eq!(fixture.events[1].bytes, vec![0x01, 0x02, 0x03]);
+        fixture.validate().unwrap();
+    }
+
+    #[test]
+    fn direction_maps_host_to_device_as_output_and_device_to_host_as_input() {
+        let packets = packets_from(WELL_FORMED_USB_JSON);
+        let fixture =
+            build_usb_fixture_from_packets(&packets, &import_options(false, false)).unwrap();
+        assert_eq!(fixture.events[0].direction, CaptureDirection::Output);
+        assert_eq!(fixture.events[1].direction, CaptureDirection::Input);
+
+        // Same mapping via the usb.src/usb.dst "host" fallback, when no
+        // endpoint direction bit is present.
+        let src_dst_json = r#"[
+          { "_source": { "layers": { "frame": { "frame.time_relative": "0.0" },
+              "usb": { "usb.transfer_type": "0x03", "usb.src": "host", "usb.dst": "1.6.1", "usb.capdata": "aa:bb" } } } },
+          { "_source": { "layers": { "frame": { "frame.time_relative": "0.1" },
+              "usb": { "usb.transfer_type": "0x03", "usb.src": "1.6.1", "usb.dst": "host", "usb.capdata": "cc:dd" } } } }
+        ]"#;
+        let packets = packets_from(src_dst_json);
+        let fixture =
+            build_usb_fixture_from_packets(&packets, &import_options(false, false)).unwrap();
+        assert_eq!(fixture.events[0].direction, CaptureDirection::Output);
+        assert_eq!(fixture.events[1].direction, CaptureDirection::Input);
+    }
+
+    #[test]
+    fn non_bulk_transfers_are_filtered_out_by_default_but_kept_with_the_escape_hatch() {
+        let json = r#"[
+          { "_source": { "layers": { "frame": { "frame.time_relative": "0.0" },
+              "usb": { "usb.transfer_type": "0x03",
+                       "usb.endpoint_address_tree": { "usb.endpoint_address.direction": "0" },
+                       "usb.capdata": "01:02" } } } },
+          { "_source": { "layers": { "frame": { "frame.time_relative": "0.001" },
+              "usb": { "usb.transfer_type": "0x02",
+                       "usb.endpoint_address_tree": { "usb.endpoint_address.direction": "0" },
+                       "usb.capdata": "03:04" } } } }
+        ]"#;
+        let packets = packets_from(json);
+        let default_filtered =
+            build_usb_fixture_from_packets(&packets, &import_options(false, false)).unwrap();
+        assert_eq!(default_filtered.events.len(), 1);
+        assert_eq!(default_filtered.events[0].bytes, vec![0x01, 0x02]);
+
+        let all_kept =
+            build_usb_fixture_from_packets(&packets, &import_options(true, false)).unwrap();
+        assert_eq!(all_kept.events.len(), 2);
+    }
+
+    #[test]
+    fn packets_with_no_payload_are_skipped() {
+        let json = r#"[
+          { "_source": { "layers": { "frame": { "frame.time_relative": "0.0" },
+              "usb": { "usb.transfer_type": "0x03",
+                       "usb.endpoint_address_tree": { "usb.endpoint_address.direction": "0" },
+                       "usb.capdata": "01:02" } } } },
+          { "_source": { "layers": { "frame": { "frame.time_relative": "0.001" },
+              "usb": { "usb.transfer_type": "0x03",
+                       "usb.endpoint_address_tree": { "usb.endpoint_address.direction": "0" },
+                       "usb.capdata": "" } } } }
+        ]"#;
+        let packets = packets_from(json);
+        let fixture =
+            build_usb_fixture_from_packets(&packets, &import_options(false, false)).unwrap();
+        assert_eq!(fixture.events.len(), 1);
+    }
+
+    #[test]
+    fn unrecognized_field_shape_produces_an_actionable_error() {
+        let json = r#"[ { "foo": "bar", "baz": 1 } ]"#;
+        let packets = packets_from(json);
+        // Bypass the transfer-type check so the failure is about the
+        // timestamp candidates specifically.
+        let error = build_usb_fixture_from_packets(&packets, &import_options(true, false))
+            .unwrap_err()
+            .to_string();
+        for candidate in TIME_FIELD_CANDIDATES {
+            assert!(
+                error.contains(candidate),
+                "error {error:?} should mention tried candidate {candidate:?}"
+            );
+        }
+        assert!(
+            error.contains("foo"),
+            "error {error:?} should list observed field `foo`"
+        );
+        assert!(
+            error.contains("baz"),
+            "error {error:?} should list observed field `baz`"
+        );
+    }
+
+    #[test]
+    fn import_usb_output_validates_and_round_trips_through_save_and_load() {
+        let packets = packets_from(WELL_FORMED_USB_JSON);
+        let fixture =
+            build_usb_fixture_from_packets(&packets, &import_options(false, false)).unwrap();
+        fixture.validate().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "cr-s88-import-usb-roundtrip-{}.yaml",
+            std::process::id()
+        ));
+        fixture.save(&path).unwrap();
+        let loaded = CaptureFixture::load(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded, fixture);
+    }
+
+    #[test]
+    fn hardware_capture_defaults_to_false_and_requires_the_flag() {
+        let packets = packets_from(WELL_FORMED_USB_JSON);
+        let without_flag =
+            build_usb_fixture_from_packets(&packets, &import_options(false, false)).unwrap();
+        assert!(!without_flag.hardware_capture);
+        let with_flag =
+            build_usb_fixture_from_packets(&packets, &import_options(false, true)).unwrap();
+        assert!(with_flag.hardware_capture);
     }
 }

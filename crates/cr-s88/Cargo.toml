@@ -10,6 +10,7 @@ cr-core = { path = "../cr-core" }
 crossbeam-channel.workspace = true
 midir.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 serde_norway.workspace = true
 thiserror.workspace = true
 
