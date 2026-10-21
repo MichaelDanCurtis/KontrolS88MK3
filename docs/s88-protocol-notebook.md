@@ -4,6 +4,39 @@ This notebook is the evidence boundary for S88 protocol work. A byte sequence is
 after a physical S88 MK3 capture reproduces it. Synthetic fixtures are useful for deterministic
 software tests, but they are never evidence that a proprietary display or DAW-port command is safe.
 
+## Evidence classes
+
+Not all evidence is equal, and the difference decides what may be transmitted. In
+descending order of authority:
+
+1. **Hardware observation** — read directly from the physical device, or a capture of
+   real traffic. The only class that can close a hardware gate. Recorded in
+   [protocol/hardware-observations.md](protocol/hardware-observations.md).
+2. **Vendor artifact** — recovered from a Native Instruments binary or shipped script
+   on this machine. Strong, because the vendor authored it, but it describes what NI's
+   code does, **not necessarily what this unit's firmware does**. See §"NI's own
+   tables are not authoritative" below for a concrete case where the two diverged.
+3. **Community inference** — third-party reverse engineering. Useful for direction.
+   Four such claims were tested during this work and three did not survive; see
+   [Corrections to public research](#corrections-to-public-research).
+
+A claim may be promoted to class 1 only by an observation, never by agreement between
+two class-2 or class-3 sources.
+
+## Recovered protocol documents
+
+| Document | Scope | Highest evidence class |
+| --- | --- | --- |
+| [protocol/daw-port.md](protocol/daw-port.md) | DAW-port SysEx framing, 20-entry command table, handshake, full channel-16 CC map | vendor artifact (NI's own Cubase MIDI Remote script) |
+| [protocol/display-command-stream.md](protocol/display-command-stream.md) | RLE/delta command stream, opcodes, pixel formats, dirty-rect semantics | vendor artifact (`NIHardwareAgent`) |
+| [protocol/display-transport.md](protocol/display-transport.md) | Bulk frame layout, USB matching, device DB, PIDs, light guide | vendor artifact (`NIHardwareAgent`) |
+| [protocol/hardware-observations.md](protocol/hardware-observations.md) | PID, HID descriptor, feature reports, port naming, serial | **hardware observation** |
+
+Read-only probe programs used to produce class-1 evidence live in
+[tools/probes/](../tools/probes/). Build each with
+`cc -o X X.c -framework IOKit -framework CoreFoundation -framework CoreMIDI`.
+None of them issues a `SetReport` or touches the bulk display pipe.
+
 ## Safety rules
 
 - Capture input before transmitting anything. The `cr-s88-capture record` command opens a MIDI
@@ -170,13 +203,67 @@ you expect from the experiment you ran.
 | Standard-template absolute CC input | Implemented, hardware acceptance pending | Capture all eight knobs at min/mid/max and confirm channel/CC assignments |
 | Device discovery and reconnect | Implemented, hardware acceptance pending | Unplug/replug trace plus runtime reconnect stats |
 | Surface banks and pickup takeover | Deterministic software tests pass | Eight-knob manual no-jump acceptance sequence |
-| DAW-port labels and values | Unverified; disabled | Paired baseline/one-label/one-value captures from the NI client |
-| Pixel framebuffer | Unverified; post-v1 | USB transfer captures with controlled solid colors and single-pixel/rectangle changes |
+| DAW-port labels and values | **Protocol documented** (vendor artifact); still disabled | Send hello `BF 01 04`, confirm the device accepts protocol version 4, then one `track_name` SysEx observed on the screen |
+| Pixel framebuffer — command stream | **Documented** (vendor artifact): opcodes, RLE/delta, formats | A capture reproducing one frame |
+| Pixel framebuffer — frame header | **Documented** (vendor artifact): `84 00 \| idx \| fmt \| 0000 0000 \| x y w h` BE16 | A capture reproducing the header |
+| Pixel framebuffer — **display geometry** | **UNKNOWN. Not present in either NI agent binary, and not readable from the device** | The Komplete Kontrol application, a service/DriverKit component, or a USB capture of a real draw |
+| USB identity and interface | **Hardware confirmed**: VID `0x17CC`, PID `0x2120`; interface class `0xFF` subclass `0xBD`, first bulk-OUT | — |
+| HID report inventory | **Hardware confirmed** from the device's own descriptor | — |
+| Light guide (`OUTPUT 0x82`) | Report present on hardware; size/semantics vendor-artifact | Illuminate one key and observe |
 
 No display byte sequence is currently approved for transmission. `UnverifiedDisplayTransport`
 must continue returning `UnverifiedProtocol` until reviewed physical captures are checked in.
+**Documenting the command stream does not change this.** The display geometry is still
+unknown, and transmitting a frame whose `w`/`h` do not match the panel is precisely the
+unsafe case these rules exist to prevent.
+
+## NI's own tables are not authoritative
+
+`NIHardwareAgent` carries a per-device HID report-map table. For `kksm3-88` it agrees
+with the device's real descriptor on eighteen report IDs — and still gets two wrong:
+
+- it lists feature report **`F-F8`, which this firmware does not implement at all**;
+- it omits **`INPUT 0x40`**, which the device does declare.
+
+The `0xF8` discrepancy cost real time: static analysis correctly showed `0xF8` being
+*read* to fetch display geometry, which looked like a way to simply ask the keyboard.
+The device rejects it identically to an undeclared report ID. The code path is real but
+belongs to other NI devices — `HIDDisplayImplementation`'s only callers are
+`KontrolMK1`, `KontrolA`, `KontrolM` and `MaschineMikroMK3`.
+
+**Rule: confirm every report ID against the live descriptor
+(`kIOHIDReportDescriptorKey`, see [tools/probes/hiddesc.c](../tools/probes/hiddesc.c))
+before relying on it.** A vendor table is a hint.
+
+## Corrections to public research
+
+Four widely repeated community claims were tested against the vendor binaries and the
+device. Record them here so they are not re-imported.
+
+| Claim | Status | Basis |
+| --- | --- | --- |
+| Display payloads carry a 4-byte little-endian length header | **Refuted** | `drawBulk` writes `84 00` then explicitly zeroes bytes `+0x04..+0x07`. There is no length field in the frame. |
+| Light guide is 128 note-indexed entries | **Refuted** | `OUTPUT 0x82` is sized to the keybed: `0x31`/`0x3D`/`0x58` for 49/61/88 keys. One byte per physical key. |
+| `A0 00 00` enters a "legacy LED mode" that disables MIDI, `A0 01 00` restores it | **Unsupported** | No such sequence found; `O-A0` is a 14-byte output report. Absence is not disproof — treat as unverified rather than as a known hazard. |
+| LED/display IPC is msgpack-RPC over a Unix socket | **Questionable** | `Devices/Komplete Kontrol.ndd` forwards to the Mach port `com.native-instruments.NIHostIntegrationAgent`. The two could coexist; the socket claim is unconfirmed here. |
+
+One correction of our own, recorded for the same reason: an interim conclusion in this
+work stated that `0xF8` was "SET-only". That was an over-read of a failed call. The
+device does not implement the report in either direction.
 
 ## Display research experiment matrix
+
+**Reprioritised.** The command stream, pixel formats and frame header are now
+documented from the vendor binaries, so most rows below are confirmation rather than
+discovery. The one open question is **display geometry**, and the frame header answers
+it directly: every draw begins
+`84 00 | idx | fmt | 00 00 00 00 | x:BE16 | y:BE16 | w:BE16 | h:BE16`.
+
+**So the highest-value experiment is now the simplest one: capture a single real draw
+and read `w`, `h` and `fmt` straight out of its header.** A full-screen redraw gives
+the panel dimensions outright. This requires a component that actually drives the MK3
+display — neither NI agent on this machine does, so Komplete Kontrol (or equivalent)
+must be installed and driving the screen for traffic to exist at all.
 
 Use separate captures for each row and reset the keyboard/host state between experiments.
 
