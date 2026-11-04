@@ -1,0 +1,35 @@
+# Novation Peak.
+# CC numbers taken from the published Summit/Peak MIDI map.
+# STATUS: verify against hardware (see plan Task 10). Do not treat as
+# confirmed until an instrument has responded to each one.
+name: novation-peak
+display_name: Novation Peak
+parameters:
+  filter.cutoff:
+    encoding: !cc7 { cc: 29 }
+    min: 0.0
+    max: 127.0
+  filter.resonance:
+    encoding: !cc7 { cc: 79 }
+    min: 0.0
+    max: 127.0
+  amp_env.attack:
+    encoding: !cc7 { cc: 86 }
+    min: 0.0
+    max: 127.0
+  amp_env.decay:
+    encoding: !cc7 { cc: 87 }
+    min: 0.0
+    max: 127.0
+  amp_env.sustain:
+    encoding: !cc7 { cc: 88 }
+    min: 0.0
+    max: 127.0
+  amp_env.release:
+    encoding: !cc7 { cc: 89 }
+    min: 0.0
+    max: 127.0
+  lfo1.rate:
+    encoding: !cc7 { cc: 30 }
+    min: 0.0
+    max: 127.0

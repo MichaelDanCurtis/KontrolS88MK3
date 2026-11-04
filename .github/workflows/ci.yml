@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96
+          components: clippy,rustfmt
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
+
+  linux-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - run: cargo build --workspace --locked --release
+      - run: file target/release/controlroom | grep -E 'ARM aarch64|ARM64'
+
+  macos-native:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96
+      - run: swift format lint --recursive Sources Tests
+        working-directory: native/ControlRoom
+      - run: swift test
+        working-directory: native/ControlRoom
+      - run: scripts/package-macos-release.sh
+      - run: scripts/verify-macos-release.sh target/dist/controlroom-*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: controlroom-macos
+          path: |
+            target/dist/*.tar.gz
+            target/dist/*.sha256
+          if-no-files-found: error

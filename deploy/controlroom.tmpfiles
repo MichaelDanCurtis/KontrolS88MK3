@@ -1,0 +1,2 @@
+d /var/lib/controlroom 0750 controlroom controlroom -
+d /var/backups/controlroom 0750 root root -

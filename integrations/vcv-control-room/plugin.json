@@ -1,0 +1,17 @@
+{
+  "slug": "ControlRoomBridge",
+  "name": "Control Room Bridge",
+  "version": "2.1.0",
+  "license": "proprietary",
+  "brand": "Control Room",
+  "author": "Control Room contributors",
+  "description": "Eight bidirectional control-voltage lanes between Control Room and VCV Rack.",
+  "modules": [
+    {
+      "slug": "Bridge8",
+      "name": "Bridge 8",
+      "description": "Eight normalized CV sends and returns over a bounded local OSC bridge.",
+      "tags": ["External", "Controller"]
+    }
+  ]
+}

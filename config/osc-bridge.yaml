@@ -1,0 +1,51 @@
+# OSC input controls the Peak cutoff while the software LFO is published to
+# an OSC listener on UDP 9001. Use --dry-run to exercise it without a Peak.
+device:
+  id: peak
+  pack: novation-peak
+  port: Peak
+  channel: 1
+osc:
+  enabled: true
+  listen: 127.0.0.1:9000
+  queue_capacity: 256
+  output_interval_ms: 10
+  bindings:
+    - id: remote.cutoff
+      direction: input
+      address: /control/cutoff
+      argument: 0
+      min: 0.0
+      max: 127.0
+    - id: monitor.lfo
+      direction: output
+      address: /control/lfo
+      argument: 0
+      min: 0.0
+      max: 1.0
+      peer: 127.0.0.1:9001
+nodes:
+  - id: remote-cutoff
+    spec: !ExternalSource
+      binding: remote.cutoff
+      default: 0.0
+    input: null
+  - id: cutoff-range
+    spec: !Scale
+      min: 20.0
+      max: 90.0
+    input: remote-cutoff
+  - id: cutoff
+    spec: !Sink
+      device: peak
+      param: filter.cutoff
+    input: cutoff-range
+  - id: lfo
+    spec: !Lfo
+      shape: sine
+      freq_hz: 0.5
+    input: null
+  - id: lfo-monitor
+    spec: !ExternalSink
+      binding: monitor.lfo
+    input: lfo

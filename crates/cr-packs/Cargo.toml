@@ -1,0 +1,10 @@
+[package]
+name = "cr-packs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_norway.workspace = true
+thiserror.workspace = true

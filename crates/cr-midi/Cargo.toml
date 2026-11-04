@@ -1,0 +1,15 @@
+[package]
+name = "cr-midi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cr-packs = { path = "../cr-packs" }
+midir.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+[[bin]]
+name = "cr-midi-monitor"
+path = "src/bin/monitor.rs"

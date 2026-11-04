@@ -1,0 +1,22 @@
+[package]
+name = "cr-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cr-core = { path = "../cr-core" }
+cr-midi = { path = "../cr-midi" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+crossbeam-channel.workspace = true
+tokio.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

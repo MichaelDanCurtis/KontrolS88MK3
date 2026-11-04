@@ -1,0 +1,33 @@
+# Multi-device example: two logical Peak instances sharing one MIDI port on
+# separate channels. Change the port match and IDs for the actual studio setup.
+device:
+  id: peak-left
+  pack: novation-peak
+  port: Peak
+  channel: 1
+devices:
+  - id: peak-right
+    pack: novation-peak
+    port: Peak
+    channel: 2
+nodes:
+  - id: lfo1
+    spec: !Lfo
+      shape: triangle
+      freq_hz: 0.3
+    input: null
+  - id: scale1
+    spec: !Scale
+      min: 20.0
+      max: 90.0
+    input: lfo1
+  - id: left-cutoff
+    spec: !Sink
+      device: peak-left
+      param: filter.cutoff
+    input: scale1
+  - id: right-resonance
+    spec: !Sink
+      device: peak-right
+      param: filter.resonance
+    input: scale1

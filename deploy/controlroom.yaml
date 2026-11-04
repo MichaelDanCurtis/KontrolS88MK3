@@ -1,0 +1,33 @@
+# Appliance configuration. Adjust both port matches after `controlroom --list-ports`.
+device:
+  id: peak
+  pack: novation-peak
+  port: Peak
+  channel: 1
+server:
+  enabled: true
+  listen: 0.0.0.0:7777
+  state_file: /var/lib/controlroom/active.state.yaml
+  publish_interval_ticks: 33
+runtime:
+  batch_ticks: 10
+  report_interval_ticks: 5000
+  parameter_min_interval_ticks: 10
+  midi_max_messages_per_second: 300
+  midi_burst_messages: 4
+nodes:
+  - id: lfo1
+    spec: !Lfo
+      shape: triangle
+      freq_hz: 0.3
+    input: null
+  - id: scale1
+    spec: !Scale
+      min: 20.0
+      max: 90.0
+    input: lfo1
+  - id: cutoff
+    spec: !Sink
+      device: peak
+      param: filter.cutoff
+    input: scale1
